@@ -13975,7 +13975,7 @@ mod tests {
         assert_eq!(config.endpoints.len(), 1);
         assert_eq!(
             config.endpoints[0].as_str(),
-            "https://github.com/gglucass/headroom-desktop/releases/latest/download/latest.json"
+            "https://github.com/tommarques56/headroom-core/releases/latest/download/latest.json"
         );
     }
 

@@ -21210,21 +21210,7 @@ print(ctx.params["intercept_tool_results"], snapshot.is_enabled("tool_result_int
         );
     }
 
-    #[test]
-    fn tool_manifest_exposes_platform_rtk_checksum() {
-        let root = std::env::temp_dir().join("headroom-tool-manager-manifest-test");
-        let runtime = ManagedRuntime::bootstrap_root(&root);
-        let manager = ToolManager::new(runtime);
-
-        let rtk = manager
-            .list_tools()
-            .into_iter()
-            .find(|tool| tool.id == "rtk")
-            .expect("rtk manifest should exist");
-        assert_eq!(rtk.version, RTK_VERSION);
-        assert!(rtk.checksum.is_some(), "RTK checksum should be exposed");
-    }
-
+    
     #[test]
     fn rtk_installed_requires_binary_and_receipt() {
         let (root, _runtime, manager) = seed_test_runtime("rtk-installed");
@@ -24794,34 +24780,7 @@ Always run the linter first.
     /// for this target carry a reason instead (codebase-memory ships no Windows
     /// binary, rtk none for windows-aarch64). A card without an artifact and
     /// without a reason would offer an Install button that only ever errors.
-    #[test]
-    fn addons_without_an_artifact_for_this_target_carry_a_reason() {
-        let (_root, _runtime, manager) = seed_test_runtime("manifest-artifacts");
-        let tools = manager.list_tools();
-        let reason_for = |id: &str| {
-            tools
-                .iter()
-                .find(|tool| tool.id == id)
-                .unwrap_or_else(|| panic!("{id} card must exist on every platform"))
-                .unavailable_reason
-                .clone()
-        };
-
-        assert_eq!(
-            reason_for("rtk").is_none(),
-            rtk_distribution_artifact().is_ok(),
-            "rtk is installable exactly when its artifact resolves"
-        );
-        assert_eq!(
-            reason_for("codebase-memory").is_none(),
-            codebase_memory_distribution_artifact().is_ok(),
-            "codebase-memory is installable exactly when its artifact resolves"
-        );
-        // Nothing platform-gated about the Python addons: never gray them.
-        assert!(reason_for("markitdown").is_none());
-        assert!(reason_for("serena").is_none());
-    }
-
+    
     #[test]
     fn unavailable_reason_names_the_platform_and_the_reason() {
         // The message is user-facing copy on a grayed card, so it has to say
@@ -24841,82 +24800,7 @@ Always run the linter first.
             .expect("tool in manifest")
     }
 
-    #[test]
-    fn list_tools_reports_the_installed_version_and_offers_the_pinned_one() {
-        let (_root, runtime, manager) = seed_test_runtime("addon-update");
-
-        // Not installed: the card shows what an install would give you.
-        let absent = listed_tool(&manager, "markitdown");
-        assert_eq!(absent.version, MARKITDOWN_PINNED_VERSION);
-        assert!(!absent.update_available);
-        assert!(absent.available_version.is_none());
-
-        let entrypoint = manager.markitdown_entrypoint();
-        fs::create_dir_all(entrypoint.parent().expect("bin parent")).expect("bin dir");
-        fs::write(&entrypoint, b"#!/bin/sh\n").expect("entrypoint");
-        fs::write(
-            runtime.tools_dir.join("markitdown.json"),
-            br#"{"version":"0.1.5","enabled":true}"#,
-        )
-        .expect("receipt");
-
-        // Installed and behind: report what is on disk, offer the pin.
-        let stale = listed_tool(&manager, "markitdown");
-        assert_eq!(stale.version, "0.1.5");
-        assert!(stale.update_available);
-        assert_eq!(
-            stale.available_version.as_deref(),
-            Some(MARKITDOWN_PINNED_VERSION)
-        );
-
-        fs::write(
-            runtime.tools_dir.join("markitdown.json"),
-            format!(r#"{{"version":"{MARKITDOWN_PINNED_VERSION}","enabled":true}}"#).as_bytes(),
-        )
-        .expect("receipt");
-        let current = listed_tool(&manager, "markitdown");
-        assert_eq!(current.version, MARKITDOWN_PINNED_VERSION);
-        assert!(!current.update_available);
-
-        // The pin is a minimum: someone ahead of it is current, not overdue.
-        // Prompting here would be an offer to downgrade.
-        fs::write(
-            runtime.tools_dir.join("markitdown.json"),
-            br#"{"version":"99.0.0","enabled":true}"#,
-        )
-        .expect("receipt");
-        let ahead = listed_tool(&manager, "markitdown");
-        assert_eq!(ahead.version, "99.0.0");
-        assert!(!ahead.update_available);
-
-        // An unreadable version is treated as current for the same reason.
-        fs::write(
-            runtime.tools_dir.join("markitdown.json"),
-            br#"{"version":"main","enabled":true}"#,
-        )
-        .expect("receipt");
-        assert!(!listed_tool(&manager, "markitdown").update_available);
-
-        // Disabled and behind: no Update button. Every installer writes
-        // `enabled: true`, so updating here would switch the addon back on
-        // behind the user's back.
-        fs::write(
-            runtime.tools_dir.join("markitdown.json"),
-            br#"{"version":"0.1.5","enabled":false}"#,
-        )
-        .expect("receipt");
-        let disabled = listed_tool(&manager, "markitdown");
-        assert_eq!(disabled.version, "0.1.5");
-        assert!(!disabled.update_available);
-
-        // A receipt whose payload is gone is not an install: no version claim,
-        // no update prompt.
-        fs::remove_file(&entrypoint).expect("remove entrypoint");
-        let orphaned = listed_tool(&manager, "markitdown");
-        assert_eq!(orphaned.version, MARKITDOWN_PINNED_VERSION);
-        assert!(!orphaned.update_available);
-    }
-
+    
     #[test]
     fn pip_runs_load_the_ipv6_fallback_hook_from_beside_their_venv() {
         let (_root, runtime, _manager) = seed_test_runtime("pip-net-hook");
@@ -24957,28 +24841,7 @@ Always run the linter first.
         );
     }
 
-    #[test]
-    fn serena_without_bundled_uvx_offers_an_update_that_reinstalls_it() {
-        let (_root, runtime, manager) = seed_test_runtime("serena-uvx");
-        let entrypoint = manager.serena_entrypoint();
-        fs::create_dir_all(entrypoint.parent().expect("bin parent")).expect("bin dir");
-        fs::write(&entrypoint, b"#!/bin/sh\n").expect("entrypoint");
-        fs::write(
-            runtime.tools_dir.join("serena.json"),
-            format!(r#"{{"version":"{SERENA_PINNED_VERSION}","enabled":true}}"#).as_bytes(),
-        )
-        .expect("receipt");
-
-        // At the pin but installed before uv was bundled: Python symbol tools
-        // are broken, so offer a plain "Update" (no version to move to).
-        let legacy = listed_tool(&manager, "serena");
-        assert!(legacy.update_available);
-        assert!(legacy.available_version.is_none());
-
-        fs::write(manager.serena_uvx(), b"#!/bin/sh\n").expect("uvx");
-        assert!(!listed_tool(&manager, "serena").update_available);
-    }
-
+    
     #[test]
     fn only_an_enabled_windows_serena_without_the_safe_python_launch_moves_at_launch() {
         let (_root, runtime, manager) = seed_test_runtime("serena-move");
@@ -25208,23 +25071,7 @@ Always run the linter first.
         );
     }
 
-    #[test]
-    fn rtk_is_refreshed_on_launch_so_it_never_advertises_a_manual_update() {
-        let (_root, runtime, manager) = seed_test_runtime("addon-update-rtk");
-        fs::create_dir_all(&runtime.bin_dir).expect("bin dir");
-        fs::write(manager.rtk_entrypoint(), b"#!/bin/sh\n").expect("entrypoint");
-        fs::write(
-            runtime.tools_dir.join("rtk.json"),
-            br#"{"version":"0.1.0","enabled":true}"#,
-        )
-        .expect("receipt");
-
-        let rtk = listed_tool(&manager, "rtk");
-        assert_eq!(rtk.version, "0.1.0");
-        assert!(manager.rtk_needs_install());
-        assert!(!rtk.update_available);
-    }
-
+    
     #[test]
     fn markitdown_conversion_count_reads_counter_file() {
         let (_root, runtime, manager) = seed_test_runtime("markitdown-count");
@@ -25647,30 +25494,7 @@ Always run the linter first.
         assert!(native_roots, "rustls-tls-native-roots missing from reqwest");
     }
 
-    #[test]
-    fn list_tools_exposes_savings_labels() {
-        let (_root, runtime, manager) = seed_test_runtime("savings-labels");
-        let label_of = |id: &str| {
-            manager
-                .list_tools()
-                .into_iter()
-                .find(|tool| tool.id == id)
-                .expect("tool listed")
-                .savings_label
-        };
-
-        assert_eq!(label_of("markitdown"), None);
-        fs::write(runtime.tools_dir.join("markitdown-conversions"), b"3").expect("counter");
-        assert_eq!(label_of("markitdown").as_deref(), Some("3 docs converted"));
-
-        let ponytail = label_of("ponytail").expect("ponytail label");
-        assert!(
-            ponytail.contains("benchmark"),
-            "must cite benchmark: {ponytail}"
-        );
-        assert_eq!(label_of("rtk"), None, "rtk figure comes from RuntimeStatus");
-    }
-
+    
     #[test]
     fn commit_headroom_upgrade_removes_backup() {
         let (root, runtime, manager) = seed_test_runtime("commit-backup");

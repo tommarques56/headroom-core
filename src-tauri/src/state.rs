@@ -14451,7 +14451,8 @@ mod tests {
         let dashboard = state.dashboard();
 
         assert!(dashboard.tools.iter().any(|tool| tool.id == "headroom"));
-        assert!(dashboard.tools.iter().any(|tool| tool.id == "rtk"));
+        // rtk removed in the core-compression fork: only headroom remains.
+        assert_eq!(dashboard.tools.len(), 1);
 
         fs::remove_dir_all(base_dir).expect("remove temp dir");
     }
