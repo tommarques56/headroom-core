@@ -1,0 +1,65 @@
+# Backend account/auth for the desktop app: Supabase (Postgres + Auth + REST)
+# plus a thin gateway that implements the /api/v1/desktop/* contract the
+# Rust client expects. Local-only: the app and the gateway talk over
+# http://127.0.0.1, and only the gateway is exposed to the host.
+#
+# Run:  docker compose up -d
+# Then: create a user in Supabase (see backend/README.md) and point the app
+# at http://127.0.0.1:8090/api/v1 (HEADROOM_ACCOUNT_API_BASE_URL at build,
+# or the debug runtime override).
+
+services:
+  supabase-db:
+    image: supabase/postgres:15.8.1.069
+    container_name: headroom-supabase-db
+    environment:
+      POSTGRES_PASSWORD: headroom_local_pg
+      POSTGRES_DB: headroom
+    volumes:
+      - supabase_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d headroom"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Minimal gateway implementing the desktop API contract:
+  #  - POST desktop/auth/request_code   -> {email, expiresInSeconds}
+  #  - POST desktop/auth/verify_code    -> session envelope
+  #  - GET  desktop/account             -> account envelope (Bearer)
+  #  - POST desktop/account/activate    -> account envelope (Bearer)
+  #  - GET  desktop/config              -> public config (paywallFirst etc.)
+  #  - POST desktop/grace/start         -> 200 (funnel noop)
+  #  - POST desktop/milestones          -> 200 (noop)
+  #  - POST desktop/weekly_limit        -> 200 (noop)
+  #  - checkout/billing endpoints       -> stub with upgrade URL
+  # Auth codes are emailed to the console (dev) and stored in Postgres.
+  gateway:
+    image: node:22-alpine
+    container_name: headroom-gateway
+    working_dir: /app
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:headroom_local_pg@supabase-db:5432/headroom
+      GATEWAY_PORT: "8090"
+      # Trial length in days (matches LOCAL_GRACE_PERIOD_HOURS on the client).
+      TRIAL_DAYS: "7"
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-placeholder-anon-key}
+      SUPABASE_URL: ${SUPABASE_URL:-http://supabase-kong:8000}
+    volumes:
+      - ./gateway:/app
+    ports:
+      - "127.0.0.1:8090:8090"
+    command: sh -c "npm install --no-audit --no-fund --omit=dev && node server.mjs"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  supabase_db_data:

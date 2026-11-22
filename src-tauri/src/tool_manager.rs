@@ -3250,9 +3250,6 @@ fn stalled_prefetch_cause(cache_dir: &Path) -> &'static str {
 
 impl ToolManager {
     pub fn new(runtime: ManagedRuntime) -> Self {
-        let rtk_checksum = rtk_distribution_artifact()
-            .ok()
-            .and_then(|artifact| artifact.sha256.map(str::to_owned));
         let manifests = vec![
             ManagedToolManifest {
                 id: "headroom".into(),
@@ -3263,101 +3260,6 @@ impl ToolManager {
                 version: HEADROOM_PINNED_VERSION.into(),
                 checksum: None,
                 required: true,
-            },
-            ManagedToolManifest {
-                id: "rtk".into(),
-                name: "RTK".into(),
-                description:
-                    "Token-optimized shell command proxy for your coding agent and your terminal.".into(),
-                runtime: "binary".into(),
-                source_url: "https://github.com/rtk-ai/rtk".into(),
-                version: RTK_VERSION.into(),
-                checksum: rtk_checksum,
-                required: false,
-            },
-            ManagedToolManifest {
-                id: "markitdown".into(),
-                name: "MarkItDown".into(),
-                description:
-                    "Converts PDF and Office documents to Markdown so they cost far fewer tokens when your agent reads them."
-                        .into(),
-                runtime: "python".into(),
-                source_url: "https://github.com/microsoft/markitdown".into(),
-                version: MARKITDOWN_PINNED_VERSION.into(),
-                checksum: None,
-                required: false,
-            },
-            ManagedToolManifest {
-                id: "serena".into(),
-                name: "Serena".into(),
-                description:
-                    "MCP server that gives your agent symbol-level code tools, so it reads one function instead of a whole file. Saves most in large repos; adds its tool definitions to every request."
-                        .into(),
-                runtime: "python".into(),
-                source_url: "https://github.com/oraios/serena".into(),
-                version: SERENA_PINNED_VERSION.into(),
-                checksum: None,
-                required: false,
-            },
-            ManagedToolManifest {
-                id: "codebase-memory".into(),
-                name: "Codebase Memory".into(),
-                description:
-                    "MCP server that indexes your codebase into a knowledge graph, so your agent answers structure questions from the graph instead of re-reading files."
-                        .into(),
-                runtime: "binary".into(),
-                source_url: "https://github.com/DeusData/codebase-memory-mcp".into(),
-                version: CODEBASE_MEMORY_VERSION.into(),
-                checksum: None,
-                required: false,
-            },
-            ManagedToolManifest {
-                id: "context7".into(),
-                name: "Context7".into(),
-                description:
-                    "MCP server that fetches current, version-specific documentation for the libraries you use, so your agent stops burning tokens on guessed or outdated APIs. Uses Context7's hosted server; only Grok runs it locally, which needs Node.js 20.18.1 or newer."
-                        .into(),
-                runtime: "node".into(),
-                source_url: "https://github.com/upstash/context7".into(),
-                version: CONTEXT7_PINNED_VERSION.into(),
-                checksum: None,
-                required: false,
-            },
-            ManagedToolManifest {
-                id: "ponytail".into(),
-                name: "Ponytail".into(),
-                description:
-                    "Plugin that nudges the agent to write the least code possible. Installs into Claude Code and Codex. Requires their CLI and Node.js on PATH."
-                        .into(),
-                runtime: "plugin".into(),
-                source_url: "https://github.com/DietrichGebert/ponytail".into(),
-                version: PLUGIN_DISPLAY_VERSION.into(),
-                checksum: None,
-                required: false,
-            },
-            ManagedToolManifest {
-                id: "caveman".into(),
-                name: "Caveman".into(),
-                description:
-                    "Plugin that makes the agent reply in terse caveman-speak, cutting output tokens while keeping code, commands, and errors exact. Installs into Claude Code and Codex. Requires their CLI and Node.js on PATH."
-                        .into(),
-                runtime: "plugin".into(),
-                source_url: "https://github.com/JuliusBrussee/caveman".into(),
-                version: PLUGIN_DISPLAY_VERSION.into(),
-                checksum: None,
-                required: false,
-            },
-            ManagedToolManifest {
-                id: "chisle".into(),
-                name: "Chisle".into(),
-                description:
-                    "Plugin that keeps replies terse and code minimal, and trims long command and web output. Covers what Ponytail and Caveman do, so use it instead of them, not alongside. Installs into Claude Code and Codex. Requires their CLI and Node.js on PATH."
-                        .into(),
-                runtime: "plugin".into(),
-                source_url: "https://github.com/JayPokale/Chisle".into(),
-                version: PLUGIN_DISPLAY_VERSION.into(),
-                checksum: None,
-                required: false,
             },
         ];
 

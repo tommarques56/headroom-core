@@ -1,3 +1,11 @@
+// Core-compression fork: the MCP/plugin/shell-proxy addons (rtk, markitdown,
+// serena, context7, codebase-memory, ponytail, caveman, chisle) were removed
+// from the install catalog and the UI. Their installer plumbing stays in
+// tool_manager/client_adapters (still exercised by unit tests and kept for a
+// future re-enable), so dead-code lint is relaxed at crate level instead of
+// deleting ~5k lines of battle-tested install/rollback code.
+#![allow(dead_code)]
+
 mod activity_facts;
 mod analytics;
 mod backend_port;
@@ -86,9 +94,9 @@ const UPDATER_PUBLIC_KEY: Option<&str> = option_env!("HEADROOM_UPDATER_PUBLIC_KE
 const UPDATER_ENDPOINTS: Option<&str> = option_env!("HEADROOM_UPDATER_ENDPOINTS");
 const UPDATER_STAGING_ENDPOINTS: Option<&str> = option_env!("HEADROOM_UPDATER_STAGING_ENDPOINTS");
 const SENTRY_DSN: Option<&str> = option_env!("HEADROOM_SENTRY_DSN");
-const DEFAULT_UPDATER_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk3QkUyNEU0MjVBMkRDM0MKUldRODNLSWw1Q1MrbC93MitlYTVoUXViSXJQNGVQWDdBRXA0Qkl4WGtpSEttNm5YTDB3QWtncEoK";
+const DEFAULT_UPDATER_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxQTRDRDBBREE5NUJENEMKUldSTXZaWGFDczJrMGJFYjdNOEJMVWQ3MlhtdGVhbjJlTkFQRC9jcjlzOTREV245eWs4c1FnRnoK";
 const DEFAULT_UPDATER_ENDPOINT: &str =
-    "https://github.com/gglucass/headroom-desktop/releases/latest/download/latest.json";
+    "https://github.com/tommarques56/headroom-core/releases/latest/download/latest.json";
 /// Cadence of the background pricing loop. It only fetches when nothing
 /// else (the webview poll, a deep link) has in the last interval, so a
 /// healthy app adds no backend load; a stalled webview still gets a
@@ -2165,222 +2173,11 @@ fn show_notification_impl(
         .map_err(|e| format!("Could not show notification: {e}"))
 }
 
-#[tauri::command]
-async fn install_addon(app: AppHandle, id: String) -> Result<DashboardState, String> {
-    // pip, npx and asset downloads run for minutes; see run_lifecycle_command.
-    run_lifecycle_command(app, move |app| {
-        // The reason reached only the UI, so a user who missed it left a log
-        // with nothing in it (no node, no CLI found: both fail before any run).
-        install_addon_blocking(&app, &id)
-            .inspect_err(|err| log::info!("addon {id}: install failed: {err}"))
-    })
-    .await
-}
 
-fn install_addon_blocking(app: &AppHandle, id: &str) -> Result<DashboardState, String> {
-    let state: State<'_, AppState> = app.state();
-    match id {
-        "markitdown" => {
-            // markitdown[all] shares the runtime venv; a pip run beside the
-            // upgrade's replaces the same files twice.
-            refuse_venv_cli_during_upgrade(&state)?;
-            state
-                .tool_manager
-                .install_markitdown()
-                .map_err(|err| err.to_string())?;
-            client_adapters::enable_markitdown_integration(
-                &state.tool_manager.markitdown_entrypoint(),
-                &state.tool_manager.markitdown_shim_path(),
-                &state.tool_manager.managed_python(),
-            )
-            .map_err(|err| {
-                format!("markitdown installed but enabling integration failed: {err:#}")
-            })?;
-        }
-        "rtk" => {
-            state
-                .tool_manager
-                .install_rtk()
-                .map_err(|err| err.to_string())?;
-            client_adapters::set_rtk_enabled(
-                true,
-                &state.tool_manager.rtk_entrypoint(),
-                &state.tool_manager.managed_python(),
-            )
-            .map_err(|err| format!("rtk installed but enabling integration failed: {err:#}"))?;
-        }
-        "ponytail" | "caveman" | "chisle" => {
-            let outdated = state
-                .tool_manager
-                .install_plugin(id)
-                .map_err(|err| err.to_string())?;
-            if let Some(host) = outdated {
-                let name = match id {
-                    "caveman" => "Caveman",
-                    "chisle" => "Chisle",
-                    _ => "Ponytail",
-                };
-                let other = if host == "Codex" {
-                    "Claude Code"
-                } else {
-                    "Codex"
-                };
-                let _ = show_notification_impl(
-                    app,
-                    &format!("Update the {host} CLI to finish {name} setup"),
-                    &format!("{name} is installed for {other}. Your {host} CLI is too old to add it -- update the {host} CLI, then re-install {name} to enable it there too."),
-                    None,
-                );
-            }
-        }
-        "serena" => {
-            state
-                .tool_manager
-                .install_serena()
-                .map_err(|err| err.to_string())?;
-        }
-        "context7" => {
-            state
-                .tool_manager
-                .install_context7()
-                .map_err(|err| err.to_string())?;
-        }
-        "codebase-memory" => {
-            state
-                .tool_manager
-                .install_codebase_memory()
-                .map_err(|err| err.to_string())?;
-        }
-        other => return Err(format!("unknown addon: {other}")),
-    }
-    Ok(state.dashboard())
-}
 
-#[tauri::command]
-async fn set_addon_enabled(
-    app: AppHandle,
-    id: String,
-    enabled: bool,
-) -> Result<DashboardState, String> {
-    run_lifecycle_command(app, move |app| {
-        set_addon_enabled_blocking(&app, &id, enabled)
-    })
-    .await
-}
 
-fn set_addon_enabled_blocking(
-    app: &AppHandle,
-    id: &str,
-    enabled: bool,
-) -> Result<DashboardState, String> {
-    let state: State<'_, AppState> = app.state();
-    match id {
-        "markitdown" => {
-            state
-                .tool_manager
-                .set_markitdown_enabled(enabled)
-                .map_err(|err| err.to_string())?;
-            if enabled {
-                client_adapters::enable_markitdown_integration(
-                    &state.tool_manager.markitdown_entrypoint(),
-                    &state.tool_manager.markitdown_shim_path(),
-                    &state.tool_manager.managed_python(),
-                )
-                .map_err(|err| err.to_string())?;
-            } else {
-                client_adapters::disable_markitdown_integration(
-                    &state.tool_manager.markitdown_shim_path(),
-                )
-                .map_err(|err| err.to_string())?;
-            }
-        }
-        "ponytail" | "caveman" | "chisle" => {
-            state
-                .tool_manager
-                .set_plugin_enabled(id, enabled)
-                .map_err(|err| err.to_string())?;
-        }
-        "serena" => {
-            state
-                .tool_manager
-                .set_serena_enabled(enabled)
-                .map_err(|err| err.to_string())?;
-        }
-        "context7" => {
-            state
-                .tool_manager
-                .set_context7_enabled(enabled)
-                .map_err(|err| err.to_string())?;
-        }
-        "codebase-memory" => {
-            state
-                .tool_manager
-                .set_codebase_memory_enabled(enabled)
-                .map_err(|err| err.to_string())?;
-        }
-        other => return Err(format!("unknown addon: {other}")),
-    }
-    Ok(state.dashboard())
-}
 
-#[tauri::command]
-async fn uninstall_addon(app: AppHandle, id: String) -> Result<DashboardState, String> {
-    run_lifecycle_command(app, move |app| uninstall_addon_blocking(&app, &id)).await
-}
 
-fn uninstall_addon_blocking(app: &AppHandle, id: &str) -> Result<DashboardState, String> {
-    let state: State<'_, AppState> = app.state();
-    match id {
-        "markitdown" => {
-            refuse_venv_cli_during_upgrade(&state)?;
-            let _ = client_adapters::disable_markitdown_integration(
-                &state.tool_manager.markitdown_shim_path(),
-            );
-            state
-                .tool_manager
-                .uninstall_markitdown()
-                .map_err(|err| err.to_string())?;
-        }
-        "rtk" => {
-            client_adapters::set_rtk_enabled(
-                false,
-                &state.tool_manager.rtk_entrypoint(),
-                &state.tool_manager.managed_python(),
-            )
-            .map_err(|err| err.to_string())?;
-            state
-                .tool_manager
-                .uninstall_rtk()
-                .map_err(|err| err.to_string())?;
-        }
-        "ponytail" | "caveman" | "chisle" => {
-            state
-                .tool_manager
-                .uninstall_plugin(id)
-                .map_err(|err| err.to_string())?;
-        }
-        "serena" => {
-            state
-                .tool_manager
-                .uninstall_serena()
-                .map_err(|err| err.to_string())?;
-        }
-        "context7" => {
-            state
-                .tool_manager
-                .uninstall_context7()
-                .map_err(|err| err.to_string())?;
-        }
-        "codebase-memory" => {
-            state
-                .tool_manager
-                .uninstall_codebase_memory()
-                .map_err(|err| err.to_string())?;
-        }
-        other => return Err(format!("unknown addon: {other}")),
-    }
-    Ok(state.dashboard())
-}
 
 fn emit_bootstrap_progress(app: &AppHandle, state: &AppState) {
     let _ = app.emit("bootstrap_progress", state.bootstrap_progress());
@@ -2463,12 +2260,7 @@ fn start_bootstrap(app: AppHandle) -> Result<(), String> {
                 return;
             }
 
-            if let Err(err) = client_adapters::ensure_rtk_integrations(
-                &state.tool_manager.rtk_entrypoint(),
-                &state.tool_manager.managed_python(),
-            ) {
-                log::warn!("RTK integrations failed after start_bootstrap thread: {err:#}");
-            }
+            // rtk removed in core build.
         }
 
         // Show "Starting Headroom" in the install loader while we wait for the
@@ -5189,17 +4981,6 @@ async fn get_launch_flags() -> Result<LaunchFlags, String> {
     .map_err(|err| err.to_string())
 }
 
-#[tauri::command]
-async fn get_rtk_activity(
-    state: State<'_, AppState>,
-    max_lines: Option<usize>,
-) -> Result<Vec<String>, String> {
-    let limit = max_lines.unwrap_or(120).clamp(20, 500);
-    state
-        .tool_manager
-        .read_rtk_activity(limit)
-        .map_err(|err| err.to_string())
-}
 
 #[tauri::command]
 async fn get_tool_logs(
@@ -7363,18 +7144,6 @@ async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<bool, St
     manager.is_enabled().map_err(|err| err.to_string())
 }
 
-#[tauri::command]
-async fn set_rtk_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> {
-    let state: tauri::State<'_, AppState> = app.state();
-    client_adapters::set_rtk_enabled(
-        enabled,
-        &state.tool_manager.rtk_entrypoint(),
-        &state.tool_manager.managed_python(),
-    )
-    .map_err(|err| err.to_string())?;
-    state.invalidate_runtime_status_cache();
-    Ok(!client_adapters::is_rtk_disabled())
-}
 
 #[tauri::command]
 fn get_usage_data_enabled() -> bool {
@@ -8865,9 +8634,6 @@ pub fn run() {
             show_app_update_notification,
             show_notification,
             take_notification_action,
-            install_addon,
-            set_addon_enabled,
-            uninstall_addon,
             prefetch_bootstrap_artifacts,
             start_bootstrap,
             get_bootstrap_progress,
@@ -8887,7 +8653,6 @@ pub fn run() {
             install_claude_code_cli,
             open_claude_code,
             get_launch_flags,
-            get_rtk_activity,
             get_tool_logs,
             get_claude_code_projects,
             get_claude_usage,
@@ -8942,7 +8707,6 @@ pub fn run() {
             accept_terms,
             get_autostart_enabled,
             set_autostart_enabled,
-            set_rtk_enabled,
             get_auto_learn_enabled,
             set_auto_learn_enabled,
             get_compression_diff,
@@ -16715,14 +16479,7 @@ Some unrelated content.
     /// clicks on a 2-core machine froze the dashboard and runtime status.
     #[test]
     fn addon_commands_run_on_the_blocking_pool() {
-        let source = include_str!("lib.rs").replace('\r', "");
-        for name in ["install_addon", "set_addon_enabled", "uninstall_addon"] {
-            let (_, body) = tauri_command_source(&source, name);
-            assert!(
-                body.contains("run_lifecycle_command("),
-                "{name} must run on the blocking pool: {body}"
-            );
-        }
+        // Addon commands removed in the core-compression build.
     }
 
     /// The transcript walk visits up to 40k entries; as a sync command it

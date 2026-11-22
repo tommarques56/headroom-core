@@ -24,7 +24,6 @@ import {
   Gift,
   House,
   Key,
-  PuzzlePiece,
   SignOut,
   Sliders,
   Sparkle,
@@ -266,108 +265,9 @@ const navItems: NavItem[] = [
   { id: "home", label: "Home", icon: House },
   { id: "optimization", label: "Optimize", icon: Sliders },
   { id: "notifications", label: "Activity", icon: Bell },
-  { id: "addons", label: "Addons", icon: PuzzlePiece },
 ];
 
-interface AddonCopy {
-  whatItDoes: string;
-  installing?: string;
-  uninstalling?: string;
-  installed?: string;
-  uninstalled?: string;
-  enabling?: string;
-  disabling?: string;
-  disabled?: string;
-}
 
-const addonCopy: Record<string, AddonCopy> = {
-  rtk: {
-    whatItDoes:
-      "Filters and compresses command outputs before they reach your LLM context, cutting 60-90% of tokens on common dev commands.",
-    installing: "Downloading RTK and registering the bash hook...",
-    uninstalling: "Removing RTK, its PATH entry, and the bash hook...",
-    uninstalled: "RTK removed. Shell commands run normally, without output rewriting.",
-    enabling: "Enabling RTK and registering the bash hook...",
-    disabling: "Disabling RTK and removing the bash hook...",
-    disabled: "RTK is off but still installed. Re-enable any time without re-downloading."
-  },
-  markitdown: {
-    whatItDoes:
-      "Converts files and Office documents to Markdown, so your agent can read Word, Excel and PowerPoint files.",
-    installing: "Installing MarkItDown and registering the Read hook...",
-    uninstalling: "Removing MarkItDown and its Read hook...",
-    uninstalled: "MarkItDown removed. Your agent reads documents in their original format again.",
-    enabling: "Enabling MarkItDown...",
-    disabling: "Disabling MarkItDown...",
-    disabled: "MarkItDown is off. It stays installed but no longer converts documents."
-  },
-  ponytail: {
-    whatItDoes:
-      "Makes your AI agent think like the laziest senior dev in the room. The best code is the code you never wrote.",
-    installing: "Registering the Ponytail plugin with your agent...",
-    uninstalling: "Removing the Ponytail plugin...",
-    uninstalled: "Ponytail removed. Your agent writes code without the Ponytail nudge.",
-    installed: "Ponytail installed. Run /ponytail-audit in your agent to scan this codebase for over-engineering.",
-    enabling: "Enabling Ponytail...",
-    disabling: "Disabling Ponytail...",
-    disabled: "Ponytail is off. It stays installed but no longer nudges the agent."
-  },
-  caveman: {
-    whatItDoes:
-      "Why use many token when few token do trick. Makes your agent talk like a caveman, while code, commands and errors stay exact.",
-    installing: "Registering the Caveman plugin with your agent...",
-    uninstalling: "Removing the Caveman plugin...",
-    uninstalled: "Caveman removed. Your agent speaks in full sentences again.",
-    installed: "Caveman installed. Run /caveman-stats in your agent to see session token savings.",
-    enabling: "Enabling Caveman...",
-    disabling: "Disabling Caveman...",
-    disabled: "Caveman is off. It stays installed but no longer compresses replies."
-  },
-  chisle: {
-    whatItDoes:
-      "Terse replies and the least code that works, in one plugin. Before writing anything your agent checks whether it needs to exist, is already in the codebase, or comes with the platform. Validation, error handling and security are never cut.",
-    installing: "Registering the Chisle plugin with your agent...",
-    uninstalling: "Removing the Chisle plugin...",
-    uninstalled: "Chisle removed. Your agent writes and replies without the Chisle rules.",
-    installed: "Chisle installed. Start a new agent session to load it.",
-    enabling: "Enabling Chisle...",
-    disabling: "Disabling Chisle...",
-    disabled: "Chisle is off. It stays installed but no longer shapes replies or code."
-  },
-  serena: {
-    whatItDoes:
-      "The IDE for your agent: semantic code retrieval and editing, so it reads the symbol it needs instead of whole files.",
-    installing: "Installing Serena and registering its MCP server...",
-    installed: "Serena installed. Restart open agent sessions to pick up the new MCP server.",
-    uninstalling: "Removing Serena and its MCP registrations...",
-    uninstalled: "Serena removed. Your agent reads code as whole files again.",
-    enabling: "Re-registering the Serena MCP server...",
-    disabling: "Removing the Serena MCP registrations...",
-    disabled: "Serena is off but still installed. Re-enable any time without re-downloading."
-  },
-  "codebase-memory": {
-    whatItDoes:
-      "Indexes your codebase into a persistent knowledge graph your agent queries instead of re-reading files. Ask your agent to index a repo the first time you use it there.",
-    installing: "Downloading Codebase Memory and registering its MCP server...",
-    installed: "Codebase Memory installed. Restart open agent sessions, then ask your agent to index the repo.",
-    uninstalling: "Removing Codebase Memory, its indexes, and its MCP registrations...",
-    uninstalled: "Codebase Memory removed. Your agent explores code by reading files again.",
-    enabling: "Re-registering the Codebase Memory MCP server...",
-    disabling: "Removing the Codebase Memory MCP registrations...",
-    disabled: "Codebase Memory is off but still installed. Re-enable any time without re-downloading."
-  },
-  context7: {
-    whatItDoes:
-      "Up-to-date code documentation for LLMs, so your agent stops guessing APIs from stale training data.",
-    installing: "Registering Context7's MCP server...",
-    installed: "Context7 installed. Restart open agent sessions to pick up the new MCP server.",
-    uninstalling: "Removing the Context7 MCP registrations...",
-    uninstalled: "Context7 removed. Your agent relies on its training data for library docs again.",
-    enabling: "Re-registering the Context7 MCP server...",
-    disabling: "Removing the Context7 MCP registrations...",
-    disabled: "Context7 is off but still installed. Re-enable any time."
-  }
-};
 
 const connectorSetupDetails: Record<string, string> = {
   claude_code:
@@ -1502,235 +1402,8 @@ function renderConnectorLogo(clientId: string) {
   return <Sparkle className="client-logo__glyph" size={20} weight="duotone" />;
 }
 
-function AddonClientChips({
-  connectors,
-  savings
-}: {
-  connectors: ClientConnectorStatus[];
-  savings?: string | null;
-}) {
-  const clients = sortClientConnectors(aggregateClientConnectors(connectors));
-  if (clients.length === 0 && !savings) {
-    return null;
-  }
-  return (
-    <div className="addon-card__clients">
-      {clients.map((connector) => {
-        const status = connectorDashboardStatus(connector);
-        return (
-          <span
-            className="callout-banner__chip"
-            key={connector.clientId}
-            title={status.label}
-          >
-            <span
-              className={`callout-banner__chip-dot callout-banner__chip-dot--${status.tone}`}
-              aria-hidden="true"
-            />
-            <span className="callout-banner__chip-name">{connector.name}</span>
-            <span className="visually-hidden">{status.label}</span>
-          </span>
-        );
-      })}
-      {savings ? (
-        <span className="callout-banner__chip" title="Savings">
-          <span
-            className="callout-banner__chip-dot callout-banner__chip-dot--active"
-            aria-hidden="true"
-          />
-          <span className="callout-banner__chip-name">{savings}</span>
-        </span>
-      ) : null}
-    </div>
-  );
-}
 
-function formatAddonVersion(version: string): string {
-  return /^\d/.test(version) ? `v${version}` : version;
-}
 
-function AddonCard({
-  name,
-  version,
-  installed,
-  enabled,
-  description,
-  copy,
-  infoOpen,
-  onToggleInfo,
-  busy,
-  busyLabel,
-  resultMessage,
-  resultIsError,
-  onDismissResult,
-  sourceUrl,
-  onOpenSource,
-  connectors,
-  showClients,
-  savings,
-  actionsDisabled,
-  onInstall,
-  onToggleEnabled,
-  onUninstall,
-  updateAvailable,
-  onUpdate,
-  availableVersion,
-  unavailableReason,
-  managedExternally,
-  overlapNotice,
-  children
-}: {
-  name: string;
-  version?: string | null;
-  installed: boolean;
-  enabled: boolean;
-  description: ReactNode;
-  copy?: AddonCopy;
-  infoOpen: boolean;
-  onToggleInfo: () => void;
-  busy: boolean;
-  busyLabel: string | null;
-  resultMessage: string | null;
-  resultIsError?: boolean;
-  onDismissResult: () => void;
-  sourceUrl: string;
-  onOpenSource: () => void;
-  connectors: ClientConnectorStatus[];
-  showClients: boolean;
-  savings?: string | null;
-  actionsDisabled: boolean;
-  onInstall: () => void;
-  onToggleEnabled: () => void;
-  onUninstall: () => void;
-  updateAvailable?: boolean;
-  onUpdate?: () => void;
-  availableVersion?: string | null;
-  /** Platform has no installable build: gray the card, drop the actions. */
-  unavailableReason?: string | null;
-  /** Installed by the user outside Headroom: show it, but own none of it. */
-  managedExternally?: boolean;
-  /** Another enabled addon gives the agent overlapping instructions. */
-  overlapNotice?: string | null;
-  children?: ReactNode;
-}) {
-  return (
-    <li className={`addon-card${unavailableReason ? " addon-card--unavailable" : ""}`}>
-      <div className="addon-card__body">
-        <div className="addon-card__heading">
-          <span className="addon-card__name">{name}</span>
-          {installed && version ? (
-            <span className="addon-card__version">{formatAddonVersion(version)}</span>
-          ) : null}
-          {copy ? (
-            <button
-              type="button"
-              className="addon-card__info"
-              aria-label={`What ${name} does`}
-              aria-expanded={infoOpen}
-              onClick={onToggleInfo}
-            >
-              i
-            </button>
-          ) : null}
-          {installed ? (
-            <span
-              className={`addon-card__badge addon-card__badge--${enabled ? "on" : "off"}`}
-            >
-              {enabled ? "Enabled" : "Disabled"}
-            </span>
-          ) : null}
-        </div>
-        {infoOpen && copy ? (
-          <p className="addon-card__info-text">{copy.whatItDoes}</p>
-        ) : null}
-        <p className="addon-card__description">{description}</p>
-        {showClients ? (
-          <AddonClientChips connectors={connectors} savings={savings} />
-        ) : null}
-        <button type="button" className="addon-card__link" onClick={onOpenSource}>
-          {sourceUrl}
-        </button>
-        {unavailableReason ? (
-          <p className="addon-card__notice">{unavailableReason}</p>
-        ) : managedExternally ? (
-          <p className="addon-card__notice">
-            You installed this yourself, so Headroom leaves it alone. Manage it with the
-            tool you installed it with.
-          </p>
-        ) : null}
-        {overlapNotice ? <p className="addon-card__notice">{overlapNotice}</p> : null}
-        {busy && busyLabel ? (
-          <p className="addon-card__progress">{busyLabel}</p>
-        ) : resultMessage ? (
-          <p
-            className={`addon-card__result${resultIsError ? " addon-card__result--error" : ""}`}
-            role={resultIsError ? "alert" : undefined}
-          >
-            {resultMessage}
-            <button
-              type="button"
-              className="addon-card__result-dismiss"
-              aria-label="Dismiss"
-              onClick={onDismissResult}
-            >
-              ×
-            </button>
-          </p>
-        ) : null}
-        {children}
-      </div>
-      <div className="addon-card__actions">
-        {unavailableReason ? (
-          <button type="button" className="addon-card__action" disabled>
-            Unavailable
-          </button>
-        ) : managedExternally ? null : !installed ? (
-          <button
-            type="button"
-            className="addon-card__action addon-card__action--primary"
-            disabled={actionsDisabled}
-            onClick={onInstall}
-          >
-            Install
-          </button>
-        ) : (
-          <>
-            {updateAvailable && onUpdate ? (
-              // install_addon is idempotent and always installs the pinned
-              // version, so it is also the upgrade path -- no second command.
-              <button
-                type="button"
-                className="addon-card__action addon-card__action--primary"
-                disabled={actionsDisabled}
-                onClick={onUpdate}
-              >
-                {availableVersion
-                  ? `Update to ${formatAddonVersion(availableVersion)}`
-                  : "Update"}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className="addon-card__action"
-              disabled={actionsDisabled}
-              onClick={onToggleEnabled}
-            >
-              {enabled ? "Disable" : "Enable"}
-            </button>
-            <button
-              type="button"
-              className="addon-card__action addon-card__action--danger"
-              disabled={actionsDisabled}
-              onClick={onUninstall}
-            >
-              Uninstall
-            </button>
-          </>
-        )}
-      </div>
-    </li>
-  );
-}
 
 const ADDON_DISPLAY_ORDER = [
   "ponytail",
@@ -1743,18 +1416,7 @@ const ADDON_DISPLAY_ORDER = [
 ];
 
 // Unknown ids land after the curated ones, before the trailing RTK card.
-function addonDisplayRank(id: string): number {
-  const rank = ADDON_DISPLAY_ORDER.indexOf(id);
-  return rank === -1 ? ADDON_DISPLAY_ORDER.length : rank;
-}
 
-function buildAddonRequestMailto(): string {
-  const subject = "Addon request";
-  const body =
-    "Which addon would you like to see in Headroom?\n\n\n" +
-    "What would it do for you / which tool does it wrap?\n\n\n";
-  return `mailto:product@extraheadroom.com?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-}
 
 function buildUpgradeIssueMailto(failure: RuntimeUpgradeFailure): string {
   const subject = `Headroom update issue (${failure.targetHeadroomVersion}, ${failure.failurePhase})`;
@@ -1785,16 +1447,9 @@ function buildUpgradeIssueMailto(failure: RuntimeUpgradeFailure): string {
 
 export default function App() {
   const [dashboard, setDashboard] = useState<DashboardState>(mockDashboard);
-  const [addonBusyId, setAddonBusyId] = useState<string | null>(null);
   const [addonBusyLabel, setAddonBusyLabel] = useState<string | null>(null);
-  const [addonInfoId, setAddonInfoId] = useState<string | null>(null);
   // Shown on the card it belongs to: a failure rendered above the list was
   // off-screen for a card further down, so a fast failure read as a flicker.
-  const [addonResult, setAddonResult] = useState<{
-    id: string;
-    message: string;
-    error?: boolean;
-  } | null>(null);
   const [bootstrapping, setBootstrapping] = useState(false);
   const [bootstrapProgress, setBootstrapProgress] =
     useState<BootstrapProgress>(idleBootstrapProgress);
@@ -1900,9 +1555,6 @@ export default function App() {
   const [showHeadroomDetails, setShowHeadroomDetails] = useState(false);
   const [headroomLogLines, setHeadroomLogLines] = useState<string[]>([]);
   const headroomLogRef = useRef<HTMLPreElement | null>(null);
-  const [showRtkDetails, setShowRtkDetails] = useState(false);
-  const [rtkActivityLines, setRtkActivityLines] = useState<string[]>([]);
-  const rtkActivityRef = useRef<HTMLPreElement | null>(null);
   const [claudeProjects, setClaudeProjects] = useState<ClaudeCodeProject[]>([]);
   const [claudeProjectsBusy, setClaudeProjectsBusy] = useState(false);
   const [claudeProjectsError, setClaudeProjectsError] = useState<string | null>(null);
@@ -2195,13 +1847,6 @@ export default function App() {
     const timer = window.setTimeout(() => setHistoryLoadTimedOut(true), 20000);
     return () => window.clearTimeout(timer);
   }, []);
-
-  useEffect(() => {
-    if (!showRtkDetails || !rtkActivityRef.current) {
-      return;
-    }
-    rtkActivityRef.current.scrollTop = rtkActivityRef.current.scrollHeight;
-  }, [showRtkDetails, rtkActivityLines]);
 
   useEffect(() => {
     dashboardSignatureRef.current = serializeState(dashboard);
@@ -3176,32 +2821,6 @@ export default function App() {
     }
   }
 
-  async function handleRtkToggle(nextEnabled: boolean) {
-    const copy = addonCopy.rtk;
-    setRtkBusy(true);
-    setAddonBusyId("rtk");
-    setAddonBusyLabel((nextEnabled ? copy?.enabling : copy?.disabling) ?? null);
-    setAddonResult(null);
-    try {
-      await invoke<boolean>("set_rtk_enabled", { enabled: nextEnabled });
-      await refreshRuntimeStatus();
-      const message = nextEnabled ? undefined : copy?.disabled;
-      if (message) {
-        setAddonResult({ id: "rtk", message });
-      }
-    } catch (error) {
-      console.error("Failed to update RTK", error);
-      setAddonResult({
-        id: "rtk",
-        message: describeInvokeError(error, "RTK could not be updated."),
-        error: true
-      });
-    } finally {
-      setRtkBusy(false);
-      setAddonBusyId(null);
-      setAddonBusyLabel(null);
-    }
-  }
 
   async function handleUninstall() {
     setUninstallBusy(true);
@@ -4524,54 +4143,6 @@ export default function App() {
     await invoke("open_external_link", { url });
   }
 
-  async function runAddonAction(
-    command: "install_addon" | "set_addon_enabled" | "uninstall_addon",
-    id: string,
-    enabled?: boolean,
-    // An update reuses install_addon, so only the wording differs.
-    updateLabels?: { busy: string; done: string }
-  ) {
-    const copy = addonCopy[id];
-    const busyLabel =
-      command === "install_addon"
-        ? (updateLabels?.busy ?? copy?.installing)
-        : command === "uninstall_addon"
-          ? copy?.uninstalling
-          : enabled
-            ? copy?.enabling
-            : copy?.disabling;
-    setAddonBusyId(id);
-    setAddonBusyLabel(busyLabel ?? null);
-    setAddonResult(null);
-    try {
-      const next = await invoke<DashboardState>(command, { id, enabled });
-      setDashboard(next);
-      if (id === "rtk") {
-        await refreshRuntimeStatus();
-      }
-      const message =
-        command === "install_addon"
-          ? (updateLabels?.done ?? copy?.installed)
-          : command === "uninstall_addon"
-            ? copy?.uninstalled
-            : enabled
-              ? undefined
-              : copy?.disabled;
-      if (message) {
-        setAddonResult({ id, message });
-      }
-    } catch (error) {
-      setAddonResult({
-        id,
-        message: describeInvokeError(error, "The addon action could not be completed."),
-        error: true
-      });
-    } finally {
-      setAddonBusyId(null);
-      setAddonBusyLabel(null);
-    }
-  }
-
   function openUpgradeAuthView(planId: UpgradePlanId | null = null) {
     setActiveView("upgradeAuth");
     setPendingUpgradePlanId(planId);
@@ -5180,14 +4751,6 @@ export default function App() {
 
   const headroomTool = dashboard.tools.find((tool) => tool.id === "headroom");
   const headroomVersion = headroomTool?.version ?? "Unknown";
-  const rtkAvgSavingsPct =
-    runtimeStatus?.rtk.installed && (runtimeStatus.rtk.totalCommands ?? 0) > 0
-      ? runtimeStatus.rtk.avgSavingsPct ?? 0
-      : null;
-  const rtkSavingsChip =
-    runtimeStatus?.rtk.installed && (runtimeStatus.rtk.totalSaved ?? 0) > 0
-      ? `~${compactNumber(runtimeStatus.rtk.totalSaved ?? 0)} tokens saved`
-      : null;
   const lifetimeDataDays = new Set(
     dashboard.dailySavings
       .map((point) => point.date)
@@ -7793,168 +7356,6 @@ export default function App() {
           />
         </div>
 
-        <div className="tray-content" hidden={activeView !== "addons"}>
-          <article className="soft-card addons-card">
-            <header className="addons-card__head">
-              <div className="addons-card__title-row">
-                <span className="addons-card__title-icon" aria-hidden="true">
-                  <PuzzlePiece weight="duotone" />
-                </span>
-                <h1>Addons</h1>
-              </div>
-              <p className="addons-card__blurb">
-                Additional tools that reduce token usage. The core proxy is
-                always on; these change how your agent behaves, so they ship off
-                and you switch on the ones you want.{" "}
-                <button
-                  type="button"
-                  className="addon-card__link"
-                  onClick={() => openLinkFromClick(`${DOCS_URL}/add-ons`)}
-                >
-                  What each addon does
-                </button>
-                {". Missing an addon you want? "}
-                <button
-                  type="button"
-                  className="addon-card__link"
-                  onClick={() => openLinkFromClick(buildAddonRequestMailto())}
-                >
-                  Request an addon
-                </button>
-              </p>
-            </header>
-          </article>
-          <ul className="addons__list">
-              {dashboard.tools
-                .filter((tool) => !tool.required && tool.id !== "rtk")
-                .sort((a, b) => addonDisplayRank(a.id) - addonDisplayRank(b.id))
-                .map((tool) => {
-                  const installed = tool.status !== "not_installed";
-                  return (
-                    <AddonCard
-                      key={tool.id}
-                      name={tool.name}
-                      version={tool.version}
-                      installed={installed}
-                      enabled={tool.enabled}
-                      description={tool.description}
-                      copy={addonCopy[tool.id]}
-                      infoOpen={addonInfoId === tool.id}
-                      onToggleInfo={() =>
-                        setAddonInfoId(addonInfoId === tool.id ? null : tool.id)
-                      }
-                      busy={addonBusyId === tool.id}
-                      busyLabel={addonBusyLabel}
-                      resultMessage={
-                        addonResult?.id === tool.id ? addonResult.message : null
-                      }
-                      resultIsError={addonResult?.error ?? false}
-                      onDismissResult={() => setAddonResult(null)}
-                      sourceUrl={tool.sourceUrl}
-                      onOpenSource={() => openLinkFromClick(tool.sourceUrl)}
-                      connectors={connectors}
-                      showClients={installed && tool.enabled}
-                      savings={tool.savingsLabel ?? null}
-                      actionsDisabled={addonBusyId !== null}
-                      updateAvailable={tool.updateAvailable ?? false}
-                      availableVersion={tool.availableVersion ?? null}
-                      unavailableReason={tool.unavailableReason ?? null}
-                      managedExternally={tool.managedExternally ?? false}
-                      overlapNotice={
-                        installed && tool.enabled
-                          ? replyAddonOverlapNotice(tool, dashboard.tools)
-                          : null
-                      }
-                      onUpdate={() =>
-                        void runAddonAction("install_addon", tool.id, undefined, {
-                          busy: `Updating ${tool.name}...`,
-                          done: `${tool.name} updated.`
-                        })
-                      }
-                      onInstall={() => void runAddonAction("install_addon", tool.id)}
-                      onToggleEnabled={() =>
-                        void runAddonAction("set_addon_enabled", tool.id, !tool.enabled)
-                      }
-                      onUninstall={() => void runAddonAction("uninstall_addon", tool.id)}
-                    />
-                  );
-                })}
-              <AddonCard
-                key="rtk"
-                name="RTK"
-                version={runtimeStatus?.rtk.version}
-                installed={runtimeStatus?.rtk.installed === true}
-                enabled={runtimeStatus?.rtk.enabled === true}
-                description={
-                  <>
-                    Token-optimizing proxy that auto-rewrites your agent's bash commands.
-                    {rtkAvgSavingsPct !== null
-                      ? ` ${percent1(rtkAvgSavingsPct)}% avg savings.`
-                      : ""}
-                  </>
-                }
-                copy={addonCopy.rtk}
-                infoOpen={addonInfoId === "rtk"}
-                onToggleInfo={() => setAddonInfoId(addonInfoId === "rtk" ? null : "rtk")}
-                busy={addonBusyId === "rtk"}
-                busyLabel={addonBusyLabel}
-                resultMessage={addonResult?.id === "rtk" ? addonResult.message : null}
-                resultIsError={addonResult?.error ?? false}
-                onDismissResult={() => setAddonResult(null)}
-                sourceUrl={
-                  dashboard.tools.find((tool) => tool.id === "rtk")?.sourceUrl ??
-                  "https://github.com/rtk-ai/rtk"
-                }
-                onOpenSource={() =>
-                  openLinkFromClick(
-                    dashboard.tools.find((tool) => tool.id === "rtk")?.sourceUrl ??
-                      "https://github.com/rtk-ai/rtk"
-                  )
-                }
-                connectors={connectors}
-                showClients={
-                  runtimeStatus?.rtk.installed === true && runtimeStatus.rtk.enabled === true
-                }
-                savings={rtkSavingsChip}
-                actionsDisabled={rtkBusy || addonBusyId !== null || !runtimeStatus}
-                unavailableReason={
-                  dashboard.tools.find((tool) => tool.id === "rtk")?.unavailableReason ??
-                  null
-                }
-                onInstall={() => void runAddonAction("install_addon", "rtk")}
-                onToggleEnabled={() => void handleRtkToggle(!runtimeStatus?.rtk.enabled)}
-                onUninstall={() => void runAddonAction("uninstall_addon", "rtk")}
-              >
-                {runtimeStatus?.rtk.installed ? (
-                  <>
-                    <button
-                      type="button"
-                      className="addon-card__link"
-                      onClick={async () => {
-                        const next = !showRtkDetails;
-                        setShowRtkDetails(next);
-                        if (next) {
-                          try {
-                            const lines = await invoke<string[]>("get_rtk_activity", { maxLines: 80 });
-                            setRtkActivityLines(lines);
-                          } catch {
-                            setRtkActivityLines(["Failed to load RTK activity."]);
-                          }
-                        }
-                      }}
-                    >
-                      {showRtkDetails ? "Hide RTK activity" : "Show RTK activity"}
-                    </button>
-                    {showRtkDetails ? (
-                      <pre className="runtime-log" ref={rtkActivityRef}>
-                        {rtkActivityLines.length > 0 ? rtkActivityLines.join("\n") : "No RTK activity yet."}
-                      </pre>
-                    ) : null}
-                  </>
-                ) : null}
-              </AddonCard>
-            </ul>
-        </div>
 
         <div
           className="tray-content tray-content--upgrade"

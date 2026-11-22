@@ -1,0 +1,94 @@
+name: Release macOS
+
+# Builds the macOS universal DMG for the core-compression fork and attaches it
+# to a GitHub release. Ad-hoc signed (no Apple Developer ID configured yet):
+# the DMG opens on the build machine's Gatekeeper with a right-click override,
+# or you add the APPLE_* secrets later for a signed+notarized build.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-macos:
+    name: macOS Universal DMG
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    env:
+      # Self-hosted account backend (Supabase gateway). Replace with the
+      # public URL of your deployment before distributing builds.
+      HEADROOM_ACCOUNT_API_BASE_URL: http://127.0.0.1:8090/api/v1
+      # Updater: signed against this fork's key; endpoints point at this
+      # repo's releases. Leave TAURI_SIGNING_* unset for now (ad-hoc build)
+      # or set the secrets once you upload the private key.
+      HEADROOM_UPDATER_PUBLIC_KEY: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxQTRDRDBBREE5NUJENUMKUldSTXZaWGFDczJrMGJFYjdNOEJMVWQ3MlhtdGVhbjJlTkFQRC9jcjlzOTREV245eWs0c1FnRnoK
+      HEADROOM_UPDATER_ENDPOINTS: '["https://github.com/tommarques56/headroom-core/releases/latest/download/latest.json"]'
+      HEADROOM_SENTRY_DSN: ""
+      VITE_SENTRY_DSN: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0cc81ae348cbc4 # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@82a92a6e8bdd1d6c3f48d7d0ab75b05a1c1a97a7 # v2.8.5
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Frontend typecheck and tests
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --skip against_the_installed_wheel
+
+      - name: Build the universal app
+        run: npx tauri build --target universal-apple-darwin
+
+      - name: Prepare release assets
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          DIST="src-tauri/target/universal-apple-darwin/release/bundle"
+          mkdir -p release-assets
+          cp "${DIST}/dmg/"*.dmg "release-assets/Headroom_${VERSION}_mac.dmg" 2>/dev/null || true
+          cp "${DIST}/macos/"*.app.tar.gz "release-assets/" 2>/dev/null || true
+          ls -la release-assets/
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@c062e1bd5c16dcf23c98e7360b72c1b99f0d77b7 # v2.3.2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload DMG as workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: headroom-macos-dmg
+          path: release-assets/*.dmg
+          retention-days: 30

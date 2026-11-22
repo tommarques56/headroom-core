@@ -16,9 +16,7 @@ use uuid::Uuid;
 
 use crate::activity_facts::{ActivityFacts, WeeklyTotals};
 use crate::bearer::{BearerToken, BEARER_TOKEN_TTL};
-use crate::client_adapters::{
-    detect_clients, ensure_rtk_integrations, is_rtk_disabled, rtk_integration_status,
-};
+use crate::client_adapters::{detect_clients, is_rtk_disabled, rtk_integration_status};
 use crate::models::{
     ActivityEvent, BootstrapFailureReport, BootstrapProgress, ClaudeAccountProfile,
     ClaudeCodeProject, ClientStatus, CodexAccountProfile, CodexRateLimitSnapshot,
@@ -857,47 +855,9 @@ impl AppState {
             }
         }
 
-        // rtk is pinned to a specific version in source. On an app upgrade the
-        // bundled binary on disk can be stale because bootstrap only runs on
-        // first-run. Reinstall if the receipt's version doesn't match the
-        // pinned version. install_rtk hits GitHub Releases, so this needs
-        // network — failure here is logged and we move on. Ordered AFTER the
-        // runtime upgrade so a slow GitHub round-trip can't delay the upgrade UI.
-        match self.tool_manager.ensure_rtk_current() {
-            Ok(true) => log::info!("rtk refreshed to pinned version on launch"),
-            Ok(false) => {}
-            Err(err) => log::warn!("rtk version check on launch failed: {err}"),
-        }
+        // rtk removed in core build: no shell-command proxy addons.
 
-        if let Err(err) = ensure_rtk_integrations(
-            &self.tool_manager.rtk_entrypoint(),
-            &self.tool_manager.managed_python(),
-        ) {
-            log::warn!("RTK integrations failed during warm_runtime_on_launch: {err:#}");
-        }
-
-        // Before the proxy starts: venvs that got markitdown[all] before
-        // 0.9.49 (or kept olefile after uninstalling it) still hold olefile.
-        self.tool_manager.remove_olefile();
-        self.tool_manager.restore_missing_lock_pins();
-
-        // Pre-wrapper installs still have a bare symlink shim; refresh it so
-        // the conversion counter starts recording without a reinstall.
-        if self.tool_manager.markitdown_installed() {
-            if let Err(err) = self.tool_manager.ensure_markitdown_shim() {
-                log::warn!("markitdown shim refresh failed during warm_runtime_on_launch: {err:#}");
-            }
-            if let Err(err) = crate::client_adapters::refresh_markitdown_integration(
-                &self.tool_manager.markitdown_entrypoint(),
-                &self.tool_manager.markitdown_shim_path(),
-                &self.tool_manager.legacy_markitdown_shim_paths(),
-                &self.tool_manager.managed_python(),
-            ) {
-                log::warn!("markitdown hook refresh failed during warm_runtime_on_launch: {err:#}");
-            }
-        }
-        self.tool_manager.ensure_codex_skill_nudges();
-        self.tool_manager.hide_ponytail_band_once();
+        // markitdown/serena/context7/plugin nudges removed in core build.
         // npm can take a minute, and this runs before the proxy starts. One
         // thread: both helpers rewrite the same agent configs.
         let tools = self.tool_manager.clone();
