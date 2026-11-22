@@ -16,7 +16,9 @@ use uuid::Uuid;
 
 use crate::activity_facts::{ActivityFacts, WeeklyTotals};
 use crate::bearer::{BearerToken, BEARER_TOKEN_TTL};
-use crate::client_adapters::{detect_clients, is_rtk_disabled, rtk_integration_status};
+use crate::client_adapters::{
+    detect_clients, ensure_rtk_integrations, is_rtk_disabled, rtk_integration_status,
+};
 use crate::models::{
     ActivityEvent, BootstrapFailureReport, BootstrapProgress, ClaudeAccountProfile,
     ClaudeCodeProject, ClientStatus, CodexAccountProfile, CodexRateLimitSnapshot,
@@ -855,9 +857,26 @@ impl AppState {
             }
         }
 
-        // rtk removed in core build: no shell-command proxy addons.
+        // rtk is pinned to a specific version in source. On an app upgrade the
+        // bundled binary on disk can be stale because bootstrap only runs on
+        // first-run. Reinstall if the receipt's version doesn't match the
+        // pinned version. install_rtk hits GitHub Releases, so this needs
+        // network — failure here is logged and we move on. Ordered AFTER the
+        // runtime upgrade so a slow GitHub round-trip can't delay the upgrade UI.
+        match self.tool_manager.ensure_rtk_current() {
+            Ok(true) => log::info!("rtk refreshed to pinned version on launch"),
+            Ok(false) => {}
+            Err(err) => log::warn!("rtk version check on launch failed: {err}"),
+        }
 
-        // markitdown/serena/context7/plugin nudges removed in core build.
+        if let Err(err) = ensure_rtk_integrations(
+            &self.tool_manager.rtk_entrypoint(),
+            &self.tool_manager.managed_python(),
+        ) {
+            log::warn!("RTK integrations failed during warm_runtime_on_launch: {err:#}");
+        }
+
+        // markitdown/serena/plugin nudges removed in core build (rtk kept).
         // npm can take a minute, and this runs before the proxy starts. One
         // thread: both helpers rewrite the same agent configs.
         let tools = self.tool_manager.clone();
@@ -14451,8 +14470,7 @@ mod tests {
         let dashboard = state.dashboard();
 
         assert!(dashboard.tools.iter().any(|tool| tool.id == "headroom"));
-        // rtk removed in the core-compression fork: only headroom remains.
-        assert_eq!(dashboard.tools.len(), 1);
+        assert!(dashboard.tools.iter().any(|tool| tool.id == "rtk"));
 
         fs::remove_dir_all(base_dir).expect("remove temp dir");
     }

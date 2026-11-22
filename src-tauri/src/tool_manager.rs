@@ -3250,6 +3250,9 @@ fn stalled_prefetch_cause(cache_dir: &Path) -> &'static str {
 
 impl ToolManager {
     pub fn new(runtime: ManagedRuntime) -> Self {
+        let rtk_checksum = rtk_distribution_artifact()
+            .ok()
+            .and_then(|artifact| artifact.sha256.map(str::to_owned));
         let manifests = vec![
             ManagedToolManifest {
                 id: "headroom".into(),
@@ -3260,6 +3263,17 @@ impl ToolManager {
                 version: HEADROOM_PINNED_VERSION.into(),
                 checksum: None,
                 required: true,
+            },
+            ManagedToolManifest {
+                id: "rtk".into(),
+                name: "RTK".into(),
+                description:
+                    "Token-optimized shell command proxy for your coding agent and your terminal.".into(),
+                runtime: "binary".into(),
+                source_url: "https://github.com/rtk-ai/rtk".into(),
+                version: RTK_VERSION.into(),
+                checksum: rtk_checksum,
+                required: false,
             },
         ];
 
@@ -21210,7 +21224,21 @@ print(ctx.params["intercept_tool_results"], snapshot.is_enabled("tool_result_int
         );
     }
 
-    
+    #[test]
+    fn tool_manifest_exposes_platform_rtk_checksum() {
+        let root = std::env::temp_dir().join("headroom-tool-manager-manifest-test");
+        let runtime = ManagedRuntime::bootstrap_root(&root);
+        let manager = ToolManager::new(runtime);
+
+        let rtk = manager
+            .list_tools()
+            .into_iter()
+            .find(|tool| tool.id == "rtk")
+            .expect("rtk manifest should exist");
+        assert_eq!(rtk.version, RTK_VERSION);
+        assert!(rtk.checksum.is_some(), "RTK checksum should be exposed");
+    }
+
     #[test]
     fn rtk_installed_requires_binary_and_receipt() {
         let (root, _runtime, manager) = seed_test_runtime("rtk-installed");
@@ -24780,7 +24808,26 @@ Always run the linter first.
     /// for this target carry a reason instead (codebase-memory ships no Windows
     /// binary, rtk none for windows-aarch64). A card without an artifact and
     /// without a reason would offer an Install button that only ever errors.
-    
+    #[test]
+    fn addons_without_an_artifact_for_this_target_carry_a_reason() {
+        // Core-compression fork: only rtk remains alongside headroom.
+        let (_root, _runtime, manager) = seed_test_runtime("manifest-artifacts");
+        let tools = manager.list_tools();
+        let reason_for = |id: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.id == id)
+                .unwrap_or_else(|| panic!("{id} card must exist on every platform"))
+                .unavailable_reason
+                .clone()
+        };
+        assert_eq!(
+            reason_for("rtk").is_none(),
+            rtk_distribution_artifact().is_ok(),
+            "rtk is installable exactly when its artifact resolves"
+        );
+    }
+
     #[test]
     fn unavailable_reason_names_the_platform_and_the_reason() {
         // The message is user-facing copy on a grayed card, so it has to say
@@ -24800,7 +24847,16 @@ Always run the linter first.
             .expect("tool in manifest")
     }
 
-    
+    #[test]
+    fn list_tools_reports_the_installed_version_and_offers_the_pinned_one() {
+        // Core-compression fork: rtk is the only optional addon with a receipt.
+        let (_root, _runtime, manager) = seed_test_runtime("addon-update");
+        let rtk = listed_tool(&manager, "rtk");
+        assert_eq!(rtk.version, RTK_VERSION);
+        assert!(!rtk.update_available);
+        assert!(rtk.available_version.is_none());
+    }
+
     #[test]
     fn pip_runs_load_the_ipv6_fallback_hook_from_beside_their_venv() {
         let (_root, runtime, _manager) = seed_test_runtime("pip-net-hook");
@@ -24841,7 +24897,11 @@ Always run the linter first.
         );
     }
 
-    
+    #[test]
+    fn serena_without_bundled_uvx_offers_an_update_that_reinstalls_it() {
+        // Core-compression fork: serena removed from the catalog; nothing to test.
+    }
+
     #[test]
     fn only_an_enabled_windows_serena_without_the_safe_python_launch_moves_at_launch() {
         let (_root, runtime, manager) = seed_test_runtime("serena-move");
@@ -25071,7 +25131,23 @@ Always run the linter first.
         );
     }
 
-    
+    #[test]
+    fn rtk_is_refreshed_on_launch_so_it_never_advertises_a_manual_update() {
+        let (_root, runtime, manager) = seed_test_runtime("addon-update-rtk");
+        fs::create_dir_all(&runtime.bin_dir).expect("bin dir");
+        fs::write(manager.rtk_entrypoint(), b"#!/bin/sh\n").expect("entrypoint");
+        fs::write(
+            runtime.tools_dir.join("rtk.json"),
+            br#"{"version":"0.1.0","enabled":true}"#,
+        )
+        .expect("receipt");
+
+        let rtk = listed_tool(&manager, "rtk");
+        assert_eq!(rtk.version, "0.1.0");
+        assert!(manager.rtk_needs_install());
+        assert!(!rtk.update_available);
+    }
+
     #[test]
     fn markitdown_conversion_count_reads_counter_file() {
         let (_root, runtime, manager) = seed_test_runtime("markitdown-count");
@@ -25494,7 +25570,18 @@ Always run the linter first.
         assert!(native_roots, "rustls-tls-native-roots missing from reqwest");
     }
 
-    
+    #[test]
+    fn list_tools_exposes_savings_labels() {
+        // Core-compression fork: rtk's figure comes from RuntimeStatus, not a
+        // savings label; headroom is required and carries none either.
+        let (_root, _runtime, manager) = seed_test_runtime("savings-labels");
+        for tool in manager.list_tools() {
+            if tool.id == "rtk" || tool.id == "headroom" {
+                assert!(tool.savings_label.is_none());
+            }
+        }
+    }
+
     #[test]
     fn commit_headroom_upgrade_removes_backup() {
         let (root, runtime, manager) = seed_test_runtime("commit-backup");
