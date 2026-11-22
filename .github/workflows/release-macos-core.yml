@@ -34,12 +34,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0cc81ae348cbc4 # v4.1.0
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
@@ -50,7 +50,7 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Rust cache
-        uses: swatinem/rust-cache@82a92a6e8bdd1d6c3f48d7d0ab75b05a1c1a97a7 # v2.8.5
+        uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
@@ -78,7 +78,7 @@ jobs:
           ls -la release-assets/
 
       - name: Upload release artifacts
-        uses: softprops/action-gh-release@c062e1bd5c16dcf23c98e7360b72c1b99f0d77b7 # v2.3.2
+        uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
           generate_release_notes: true
@@ -87,7 +87,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload DMG as workflow artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v4
         with:
           name: headroom-macos-dmg
           path: release-assets/*.dmg
