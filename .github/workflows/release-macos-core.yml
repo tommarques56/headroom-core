@@ -77,6 +77,28 @@ jobs:
           mkdir -p release-assets
           cp "${DIST}/dmg/"*.dmg "release-assets/Headroom_${VERSION}_mac.dmg" 2>/dev/null || true
           cp "${DIST}/macos/"*.app.tar.gz "release-assets/" 2>/dev/null || true
+          cp "${DIST}/macos/"*.app.tar.gz.sig "release-assets/" 2>/dev/null || true
+          python3 - <<'PYEOF'
+          import json, glob, datetime, os
+          dist = "src-tauri/target/universal-apple-darwin/release/bundle"
+          targz = glob.glob(f"{dist}/macos/*.app.tar.gz")[0]
+          sig = open(targz + ".sig").read().strip()
+          version = json.load(open("package.json"))["version"]
+          tag = os.environ.get("GITHUB_REF_NAME") if os.environ.get("GITHUB_REF_TYPE") == "tag" else f"v{version}"
+          url = f"https://github.com/tommarques56/headroom-core/releases/download/{tag}/Headroom.app.tar.gz"
+          latest = {
+              "version": version,
+              "notes": f"Headroom core build {version}",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": {
+                  "darwin-aarch64": {"signature": sig, "url": url},
+                  "darwin-x86_64": {"signature": sig, "url": url},
+              },
+          }
+          with open("release-assets/latest.json", "w") as f:
+              json.dump(latest, f, indent=2)
+          print("latest.json written for", version, "->", url)
+          PYEOF
           ls -la release-assets/
 
       - name: Upload release artifacts
