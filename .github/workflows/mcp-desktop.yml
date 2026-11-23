@@ -1,0 +1,92 @@
+name: MCP Desktop
+
+# Dedicated workflow for the desktop-app MCP integration (Claude Desktop,
+# Cursor, ChatGPT Desktop). Kept separate from test.yml so this new surface
+# can be validated and its failures understood without touching the existing
+# test matrix or the other agents working off it.
+#
+# None of the runners install the desktop apps, so this validates the pure
+# logic: the Rust unit tests drive the config write/restore/delete round-trips
+# against temp files, and the frontend tests drive the manager panel against a
+# mocked invoke. The real `headroom mcp serve --transport http` smoke test
+# lives on, guarded by a marker, and is exercised by the release workflows.
+
+on:
+  push:
+    branches:
+      - nov23-backlog
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            pkg-config \
+            wget
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        with:
+          tool: nextest
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: |
+            src-tauri -> target
+
+      - name: Desktop MCP unit tests
+        # Runs with --lib so desktop_mcp's tests compile and run without a
+        # managed runtime (they write to temp files, never the real configs).
+        run: |
+          cargo nextest run \
+            --manifest-path src-tauri/Cargo.toml \
+            --lib \
+            desktop_mcp::
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck frontend
+        run: npx tsc --noEmit
+
+      - name: Desktop MCP panel tests
+        run: npx vitest run src/components/DesktopMcpPanel.test.tsx
+
+      - name: Frontend lint
+        run: npm run lint

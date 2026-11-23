@@ -223,6 +223,7 @@ import { ActivityFeed } from "./components/ActivityFeed";
 import { AuthCodeForm } from "./components/AuthCodeForm";
 import { ReferralCard, ReferralCodeEntry } from "./components/ReferralCard";
 import { ConnectorIcon, hasConnectorIcon } from "./components/ConnectorIcon";
+import { DesktopMcpPanel } from "./components/DesktopMcpPanel";
 import { LauncherShell } from "./components/LauncherShell";
 import { LearnScanStatusLine } from "./components/LearnScanStatusLine";
 import { OptimizePanel } from "./components/OptimizePanel";
@@ -7954,6 +7955,7 @@ export default function App() {
                 ) : null}
               </AddonCard>
             </ul>
+            <DesktopMcpPanel />
         </div>
 
         <div

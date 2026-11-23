@@ -13,6 +13,7 @@ mod claude_cli;
 mod claude_statusline;
 mod claude_wrapper;
 mod client_adapters;
+mod desktop_mcp;
 mod device;
 mod env_fault;
 mod keychain;
@@ -83,7 +84,8 @@ use crate::models::{
     ActivityFeedResponse, BillingPeriod, BootstrapFailureReport, BootstrapProgress,
     ClaudeAccountProfile, ClaudeCodeProject, ClaudePlanUsage, ClaudeUsage, ClientConnectorStatus,
     ClientSetupResult, CodexRateLimitSnapshot, DailySavingsPoint, DashboardState,
-    HeadroomAuthCodeRequest, HeadroomLearnPrereqStatus, HeadroomLearnStatus, HeadroomPricingStatus,
+    DesktopMcpChangeResponse, DesktopMcpStatus, HeadroomAuthCodeRequest, HeadroomLearnPrereqStatus,
+    HeadroomLearnStatus, HeadroomPricingStatus,
     HeadroomSubscriptionTier, LabeledPlanWindow, PlanWindow, RuntimeStatus, RuntimeUpgradeProgress,
     TransformationFeedResponse,
 };
@@ -4885,6 +4887,51 @@ fn claude_desktop_installed() -> bool {
     client_adapters::claude_desktop_installed()
 }
 
+/// Desktop harnesses (Claude Desktop, Cursor, ChatGPT Desktop) that are
+/// installed on this machine, with their Headroom MCP wiring state. Only
+/// present harnesses are returned.
+#[tauri::command]
+fn detect_desktop_mcp() -> Vec<DesktopMcpStatus> {
+    desktop_mcp::detect()
+}
+
+/// Install the Headroom MCP server into a desktop harness's config, or start
+/// the Streamable HTTP endpoint for ChatGPT Desktop. `entrypoint` comes from
+/// the managed runtime so GUI-launched apps can start the server.
+#[tauri::command]
+fn install_desktop_mcp(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DesktopMcpChangeResponse, String> {
+    let entrypoint = state.tool_manager.headroom_entrypoint();
+    let change = desktop_mcp::install(&id, &entrypoint).map_err(|err| err.to_string())?;
+    Ok(DesktopMcpChangeResponse {
+        path: change.path.map(|p| p.to_string_lossy().into_owned()),
+        url: change.url,
+    })
+}
+
+/// Remove the Headroom MCP server from a desktop harness's config, or stop
+/// the Streamable HTTP endpoint for ChatGPT Desktop.
+#[tauri::command]
+fn uninstall_desktop_mcp(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DesktopMcpChangeResponse, String> {
+    let entrypoint = state.tool_manager.headroom_entrypoint();
+    let change = desktop_mcp::uninstall(&id, &entrypoint).map_err(|err| err.to_string())?;
+    Ok(DesktopMcpChangeResponse {
+        path: change.path.map(|p| p.to_string_lossy().into_owned()),
+        url: change.url,
+    })
+}
+
+/// Whether a desktop harness's Headroom MCP wiring is currently in place.
+#[tauri::command]
+fn desktop_mcp_configured(id: String) -> bool {
+    desktop_mcp::configured(&id)
+}
+
 // async: polled every 5s from the post-install screen, and a sync command
 // runs `tasklist` / `ps` on the main thread (Tauri 2), stuttering the UI.
 #[tauri::command(async)]
@@ -8890,6 +8937,10 @@ pub fn run() {
             get_running_agent_process_counts,
             get_client_local_activity_ages,
             claude_desktop_installed,
+            detect_desktop_mcp,
+            install_desktop_mcp,
+            uninstall_desktop_mcp,
+            desktop_mcp_configured,
             get_gated_bypass_bytes,
             install_claude_code_cli,
             open_claude_code,

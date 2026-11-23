@@ -500,6 +500,29 @@ pub struct ClientConnectorStatus {
     pub requests_since_yesterday: u64,
 }
 
+/// One row of the desktop MCP manager: a desktop harness (Claude Desktop,
+/// Cursor or ChatGPT Desktop) that is installed on this machine and that this
+/// app can wire the Headroom MCP server into.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopMcpStatus {
+    pub client_id: String,
+    pub name: String,
+    /// The harness app's install root is present on this machine.
+    pub present: bool,
+    /// Our MCP server entry (stdio) or endpoint (HTTP) is in place for it.
+    pub mcp_configured: bool,
+}
+
+/// Result of a desktop MCP install/uninstall: which config file was updated
+/// and/or the endpoint URL a remote-only harness (ChatGPT Desktop) should use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopMcpChangeResponse {
+    pub path: Option<String>,
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RtkRuntimeStatus {

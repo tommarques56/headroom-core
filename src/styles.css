@@ -6365,3 +6365,31 @@ html.window-hiding {
 .crash-fallback button:hover {
   background: var(--surface-overlay);
 }
+
+/* Desktop-app MCP manager (Addons panel). Uses the addon-card visual
+   language; only the section wrapper is new. */
+.addons-mcp {
+  margin-top: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.addons-mcp__title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.addons-mcp__hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.addons-mcp .addons__list--mcp {
+  margin-top: 4px;
+}
+
