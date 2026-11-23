@@ -421,6 +421,15 @@ jobs:
           if [ "${{ matrix.runOs }}" = "linux" ]; then
             Xvfb :99 -screen 0 1280x800x24 &
             export DISPLAY=:99
+            export WEBKIT_DISABLE_DMABUF_RENDERER=1
+            # Run from the extracted AppImage root so WebKit finds its
+            # sub-processes via './lib/.../WebKitNetworkProcess' relative paths.
+            hroot="$(dirname "$(dirname "${{ steps.install.outputs.bin }}")")"
+            [ -e "$hroot/AppRun" ] || hroot="$(dirname "${{ steps.install.outputs.bin }}")"
+            cd "$hroot"
+            echo "HRROOT=$hroot CWD=$(pwd)"
+            bin_sub="$(basename "${{ steps.install.outputs.bin }}")"
+            if [ -e "$hroot/$bin_sub" ]; then export HRBIN="./$bin_sub"; fi
           fi
           if [ "${{ matrix.runOs }}" = "macos" ]; then
             # GH macOS runners set com.apple.quarantine on downloaded apps -> Gatekeeper
@@ -433,7 +442,11 @@ jobs:
             lipo -info "${{ steps.install.outputs.bin }}" 2>&1 || true
             codesign -dv "$appdir" 2>&1 | head -3 || true
           fi
-          "${{ steps.install.outputs.bin }}" > "$RUNNER_TEMP/headroom.log" 2>&1 &
+          if [ "${{ matrix.runOs }}" = "linux" ] && [ -n "${HRBIN:-}" ]; then
+            $HRBIN > "$RUNNER_TEMP/headroom.log" 2>&1 &
+          else
+            "${{ steps.install.outputs.bin }}" > "$RUNNER_TEMP/headroom.log" 2>&1 &
+          fi
           echo "HR_PID=$!"
           sleep 3
           if ! kill -0 "$HR_PID" 2>/dev/null; then
