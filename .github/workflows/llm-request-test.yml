@@ -43,7 +43,7 @@ jobs:
         harness: [claude_code, codex, opencode]
 
     env:
-      HEADROOM_DATA_DIR: ${{ runner.temp }}/headroom-data
+      HEADROOM_DATA_DIR: /tmp/headroom-data
       HEADROOM_ACCOUNT_API_BASE_URL: http://127.0.0.1:8090/api/v1
 
     steps:
