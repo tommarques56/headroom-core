@@ -1,0 +1,225 @@
+name: Release Cross-Platform (Windows + Linux)
+
+# Builds Windows (NSIS, dev profile → unsigned runtime, no Azure signing) and
+# Linux (AppImage + deb) bundles for the core-compression fork and attaches
+# them to the same GitHub release as the macOS DMG (release-macos-core.yml).
+# A tag `v*` or a manual dispatch triggers the full macOS job too; this
+# workflow only adds Windows and Linux on top.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64 (dev/unsigned)
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    env:
+      # No Azure signing secrets in this fork: build with the dev profile so
+      # signed_windows_runtime_sha() = None and the unsigned runtime is used.
+      # The NSIS installer still gets produced and published.
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      HEADROOM_ACCOUNT_API_BASE_URL: http://127.0.0.1:8090/api/v1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Frontend typecheck and tests
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+
+      - name: Rust tests
+        # signed Windows runtime env vars are compile-time-required only in
+        # release; the dev profile below needs no HEADROOM_SIGNED_RUNTIME_*.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --skip against_the_installed_wheel
+
+      - name: Neutralize Azure signCommand (not available in this fork)
+        # tauri.conf.json carries the upstream's Windows Authenticode
+        # signCommand (artifact-signing-cli → Azure). This fork has no Azure
+        # secrets: strip the key so debug NSIS bundling doesn't invoke the
+        # signing CLI and fail. Works on both pwsh and bash (regex, no JSON
+        # round-trip so the existing formatting is preserved).
+        shell: bash
+        run: |
+          sed -i '/"signCommand"[[:space:]]*:/d' src-tauri/tauri.conf.json
+          if grep -q '"signCommand"' src-tauri/tauri.conf.json; then
+            echo "ERROR: signCommand still present" >&2
+            exit 1
+          fi
+          echo "signCommand removed OK"
+
+      - name: Build NSIS installer (debug profile, unsigned runtime)
+        # --debug: Tauri bundles from the debug (non-optimized) build, whose
+        # code uses the unsigned runtime path (no Azure signing deps; the
+        # release path requires HEADROOM_SIGNED_RUNTIME_* env vars that only
+        # the upstream's Azure pipeline sets).
+        shell: pwsh
+        run: |
+          npm run tauri -- build --debug --bundles nsis
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          mkdir -p release-assets
+          dist="src-tauri/target/x86_64-pc-windows-msvc/debug/bundle/nsis"
+          setup="$(ls "$dist"/*-setup.exe | head -1)"
+          mv "$setup" "release-assets/Headroom_${version}_x64-setup.exe"
+          # Tauri updater (minisign) can sign the NSIS in dev too when the
+          # private key is present; keep the .sig if produced.
+          for f in "$dist"/*.sig "$dist"/*.nsis.zip "$dist"/*.exe.sig; do
+            [ -f "$f" ] && cp "$f" release-assets/ 2>/dev/null || true
+          done
+          ls -la release-assets/
+
+      - name: Upload to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          append_body: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: headroom-windows-nsis
+          path: release-assets/*
+          retention-days: 30
+
+  linux:
+    name: Linux x86_64 (AppImage + deb)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    env:
+      HEADROOM_ACCOUNT_API_BASE_URL: http://127.0.0.1:8090/api/v1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-24.04-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            apt-24.04-
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo mkdir -p ~/apt-archives/partial
+          sudo apt-get update
+          sudo apt-get install -y \
+            -o Dir::Cache::Archives="$HOME/apt-archives" \
+            -o APT::Keep-Downloaded-Packages=true \
+            build-essential curl file \
+            libayatana-appindicator3-dev librsvg2-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libxdo-dev pkg-config wget
+          sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Frontend typecheck and tests
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --skip against_the_installed_wheel
+
+      - name: Build AppImage and deb
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --target x86_64-unknown-linux-gnu --bundles deb,appimage
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          mkdir -p release-assets
+          bundle="src-tauri/target/x86_64-unknown-linux-gnu/release/bundle"
+          appimage="$(ls "$bundle"/appimage/*.AppImage | head -1)"
+          deb="$(ls "$bundle"/deb/*.deb | head -1)"
+          cp "$appimage" "release-assets/Headroom_${version}_amd64.AppImage"
+          cp "$deb" "release-assets/Headroom_${version}_amd64.deb"
+          for f in "$bundle"/appimage/*.sig "$bundle"/deb/*.sig; do
+            [ -f "$f" ] && cp "$f" release-assets/ 2>/dev/null || true
+          done
+          ls -la release-assets/
+
+      - name: Upload to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          append_body: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: headroom-linux-bundles
+          path: release-assets/*
+          retention-days: 30
