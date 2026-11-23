@@ -147,6 +147,53 @@ jobs:
           path: release-assets/*
           retention-days: 30
 
+      - name: Smoke test — boot the built binary and wait for backend /readyz
+        # Tests the artifact we just built (not a separate job): launch the
+        # built exe on this same fresh runner, let the runtime self-install,
+        # and require the backend to answer /readyz on 6768. Covers harness
+        # detection end-to-end on the shipped binary because the connectors
+        # (Claude Code / Codex / OpenCode) are listed from this same process.
+        shell: bash
+        env:
+          BACKEND_PORT: "6768"
+        run: |
+          set -euo pipefail
+          # Locate the built exe: debug profile, NSIS staged binary lives in
+          # the Tauri target; prefer the one that was just packaged.
+          exe=""
+          for p in \
+            "src-tauri/target/x86_64-pc-windows-msvc/debug/headroom-desktop.exe" \
+            "src-tauri/target/debug/headroom-desktop.exe"; do
+            [ -f "$p" ] && exe="$p" && break
+          done
+          [ -n "$exe" ] || { echo "built exe not found" >&2; find src-tauri/target -name '*.exe' | head; exit 1; }
+          echo "Booting $exe"
+          "$exe" > "$RUNNER_TEMP/headroom-smoke.log" 2>&1 &
+          app_pid=$!
+          deadline=$(( $(date +%s) + 1500 ))  # 25 min for runtime self-install
+          ok=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz" > /dev/null 2>&1; then
+              ok=1; break
+            fi
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              echo "::error::app process died during first boot"
+              tail -100 "$RUNNER_TEMP/headroom-smoke.log"
+              exit 1
+            fi
+            sleep 10
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::backend /readyz never answered on :${BACKEND_PORT}"
+            tail -100 "$RUNNER_TEMP/headroom-smoke.log"
+            exit 1
+          fi
+          echo "Backend ready on :${BACKEND_PORT}"
+          curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz"
+          echo
+          echo "Backend smoke OK"
+          kill "$app_pid" 2>/dev/null || true
+
   linux:
     name: Linux x86_64 (AppImage + deb)
     runs-on: ubuntu-24.04
@@ -264,3 +311,45 @@ jobs:
           name: headroom-linux-bundles
           path: release-assets/*
           retention-days: 30
+
+      - name: Smoke test — boot the built binary and wait for backend /readyz
+        # See the Windows job's smoke test: this exercises the Linux artifact
+        # we just built on the same fresh runner. Xvfb provides the display
+        # the app needs; the runtime self-installs on first boot.
+        shell: bash
+        env:
+          BACKEND_PORT: "6768"
+          DISPLAY: ":99"
+        run: |
+          set -euo pipefail
+          Xvfb :99 -screen 0 1280x800x24 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          bin="src-tauri/target/x86_64-unknown-linux-gnu/release/headroom-desktop"
+          [ -x "$bin" ] || { echo "build binary not found: $bin" >&2; exit 1; }
+          echo "Booting $bin"
+          "$bin" > "$RUNNER_TEMP/headroom-smoke.log" 2>&1 &
+          app_pid=$!
+          deadline=$(( $(date +%s) + 1500 ))
+          ok=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz" > /dev/null 2>&1; then
+              ok=1; break
+            fi
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              echo "::error::app process died during first boot"
+              tail -100 "$RUNNER_TEMP/headroom-smoke.log"
+              exit 1
+            fi
+            sleep 10
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::backend /readyz never answered on :${BACKEND_PORT}"
+            tail -100 "$RUNNER_TEMP/headroom-smoke.log"
+            exit 1
+          fi
+          echo "Backend ready on :${BACKEND_PORT}"
+          curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz"
+          echo
+          echo "Backend smoke OK"
+          kill "$app_pid" 2>/dev/null || true

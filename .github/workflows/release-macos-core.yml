@@ -137,3 +137,42 @@ jobs:
           name: headroom-macos-dmg
           path: release-assets/*.dmg
           retention-days: 30
+
+      - name: Smoke test — boot the built app and wait for backend /readyz
+        # Exercises the macOS artifact (the universal .app that was just
+        # bundled) on this same fresh runner: launch it, let the runtime
+        # self-install on first boot, and require the backend /readyz on 6768.
+        shell: bash
+        env:
+          BACKEND_PORT: "6768"
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/universal-apple-darwin/release/bundle/macos/Headroom.app"
+          [ -d "$app" ] || { echo "app bundle not found: $app" >&2; exit 1; }
+          bin="$app/Contents/MacOS/headroom-desktop"
+          echo "Booting $bin"
+          "$bin" > "$RUNNER_TEMP/headroom-smoke.log" 2>&1 &
+          app_pid=$!
+          deadline=$(( $(date +%s) + 1500 ))  # 25 min for runtime self-install
+          ok=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz" > /dev/null 2>&1; then
+              ok=1; break
+            fi
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              echo "::error::app process died during first boot"
+              tail -100 "$RUNNER_TEMP/headroom-smoke.log"
+              exit 1
+            fi
+            sleep 10
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::backend /readyz never answered on :${BACKEND_PORT}"
+            tail -100 "$RUNNER_TEMP/headroom-smoke.log"
+            exit 1
+          fi
+          echo "Backend ready on :${BACKEND_PORT}"
+          curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz"
+          echo
+          echo "Backend smoke OK"
+          kill "$app_pid" 2>/dev/null || true
