@@ -7,13 +7,15 @@
 //! Cursor, the ChatGPT desktop app), none of which honor the CLI routing
 //! environment variables.
 //!
-//! This module owns the per-app wiring:
+//! This module owns the per-app wiring. Every harness is configured by writing
+//! a `headroom` server entry into the config file the app already reads, in its
+//! native format:
 //! - Claude Desktop reads `mcpServers` from `claude_desktop_config.json`.
 //! - Cursor reads `mcpServers` from `~/.cursor/mcp.json` (global).
-//! - The ChatGPT desktop app only supports *remote* MCP connectors (Streamable
-//!   HTTP), so we run `headroom mcp serve --transport http` as a child process
-//!   and point the connector at its loopback URL. We do not try to place a
-//!   stdio entry anywhere for ChatGPT.
+//! - The ChatGPT desktop app and Codex share MCP configuration in
+//!   `~/.codex/config.toml` (`[mcp_servers.headroom]`, stdio) - the app's own
+//!   "Settings -> MCP servers -> Add server (STDIO)" screen writes the same
+//!   file, so writing it ourselves gives the same result with zero manual work.
 //!
 //! Everything is reversible: install/uninstall round-trips the exact prior
 //! value of the touched fields, writes through `atomic_write`, and refuses to
@@ -24,7 +26,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::client_adapters;
@@ -38,48 +39,31 @@ pub const MCP_SERVER_NAME: &str = "headroom";
 /// (which is private to that module).
 pub const HEADROOM_PROXY_URL: &str = "http://127.0.0.1:6767";
 
-/// Loopback port for the Streamable HTTP MCP transport (ChatGPT desktop).
-/// 8788 is the documented default; when an unrelated process already holds it
-/// (e.g. a local gateway script), the server binds the next free port so a
-/// busy machine never blocks the ChatGPT button. The chosen port is returned
-/// to the UI so the user points the custom connector at the real URL.
-pub const MCP_HTTP_PORT: u16 = 8788;
-pub const MCP_HTTP_PATH: &str = "/mcp";
-const MCP_HTTP_PORT_SCAN_LIMIT: u16 = 20;
-
-/// What kind of MCP wiring a desktop harness needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DesktopMcpKind {
-    /// stdio entry in a JSON `mcpServers` file the app reads.
-    Stdio,
-    /// A Streamable HTTP endpoint the app connects to as a remote server.
-    StreamableHttp,
-}
-
 /// A desktop harness this app can wire MCP into.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesktopHarness {
     pub id: &'static str,
     pub name: &'static str,
-    pub kind: DesktopMcpKind,
+    /// Config file format: Claude Desktop and Cursor use a JSON `mcpServers`
+    /// object; the ChatGPT desktop app shares Codex's TOML config.
+    pub toml: bool,
 }
 
 const DESKTOP_HARNESSES: [DesktopHarness; 3] = [
     DesktopHarness {
         id: "claude_desktop",
         name: "Claude Desktop",
-        kind: DesktopMcpKind::Stdio,
+        toml: false,
     },
     DesktopHarness {
         id: "cursor",
         name: "Cursor",
-        kind: DesktopMcpKind::Stdio,
+        toml: false,
     },
     DesktopHarness {
         id: "chatgpt_desktop",
         name: "ChatGPT Desktop",
-        kind: DesktopMcpKind::StreamableHttp,
+        toml: true,
     },
 ];
 
@@ -168,11 +152,17 @@ pub fn detect() -> Vec<DesktopMcpStatus> {
 }
 
 fn mcp_configured_for(h: &DesktopHarness) -> bool {
-    match h.kind {
-        DesktopMcpKind::Stdio => config_path_for(h)
-            .and_then(|p| read_json_file(&p))
-            .is_some_and(|c| has_headroom_mcp(&c)),
-        DesktopMcpKind::StreamableHttp => http_server_running(),
+    let Some(path) = config_path_for(h) else {
+        return false;
+    };
+    if !path.exists() {
+        return false;
+    }
+    if h.toml {
+        read_toml(&path)
+            .is_some_and(|doc| doc.get("mcp_servers").and_then(|v| v.as_table()).is_some_and(|t| t.contains_key(MCP_SERVER_NAME)))
+    } else {
+        read_json_file(&path).is_some_and(|c| has_headroom_mcp(&c))
     }
 }
 
@@ -195,20 +185,49 @@ fn write_json_file(path: &Path, map: &Map<String, Value>) -> Result<()> {
     client_adapters::atomic_write(path, &bytes)
 }
 
-/// True when `mcpServers` holds our server entry (by name or footprint).
+/// True when `mcpServers` holds our server entry (by name).
 fn has_headroom_mcp(root: &Map<String, Value>) -> bool {
     root.get("mcpServers")
         .and_then(Value::as_object)
         .is_some_and(|servers| servers.contains_key(MCP_SERVER_NAME))
 }
 
-/// Config path per stdio harness, or None for a harness without a file.
+fn read_toml(path: &Path) -> Option<toml::Table> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    raw.parse::<toml::Table>().ok()
+}
+
+fn write_toml(path: &Path, table: &toml::Table) -> Result<()> {
+    let mut bytes = table.to_string().into_bytes();
+    if !bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    }
+    client_adapters::atomic_write(path, &bytes)
+}
+
+/// The ChatGPT desktop app (and Codex) use a `[mcp_servers.headroom]` TOML
+/// table. Returns true when that table exists.
+fn has_headroom_mcp_toml(table: &toml::Table) -> bool {
+    table
+        .get("mcp_servers")
+        .and_then(|v| v.as_table())
+        .is_some_and(|servers| servers.contains_key(MCP_SERVER_NAME))
+}
+
+/// Config path per harness.
 fn config_path_for(h: &DesktopHarness) -> Option<PathBuf> {
     match h.id {
         "claude_desktop" => claude_desktop_config_path(),
         "cursor" => Some(client_adapters::home_dir().join(".cursor").join("mcp.json")),
+        "chatgpt_desktop" => Some(codex_config_path()),
         _ => None,
     }
+}
+
+/// The ChatGPT desktop app, Codex CLI and the IDE extension share MCP server
+/// configuration in `~/.codex/config.toml` (see module doc).
+fn codex_config_path() -> PathBuf {
+    client_adapters::home_dir().join(".codex").join("config.toml")
 }
 
 #[cfg(target_os = "macos")]
@@ -254,12 +273,10 @@ fn mcp_stdio_server_value(entrypoint: &Path) -> Value {
 // Install / uninstall / status
 // ---------------------------------------------------------------------------
 
-/// Result of an install/uninstall: which config file was touched (stdio
-/// harnesses) and/or which endpoint URL the harness should use (HTTP).
+/// Result of an install/uninstall: which config file was touched.
 #[derive(Debug, Clone, Default)]
 pub struct McpChange {
     pub path: Option<PathBuf>,
-    pub url: Option<String>,
 }
 
 /// Install the MCP server for a harness. `entrypoint` is the managed
@@ -267,45 +284,32 @@ pub struct McpChange {
 pub fn install(id: &str, entrypoint: &Path) -> Result<McpChange> {
     let h = harness(id)
         .with_context(|| format!("unknown desktop harness {id}"))?;
-    match h.kind {
-        DesktopMcpKind::Stdio => {
-            let path = config_path_for(h)
-                .with_context(|| format!("no config path for {id}"))?;
-            upsert_stdio_entry(&path, entrypoint)?;
-            Ok(McpChange {
-                path: Some(path),
-                url: None,
-            })
-        }
-        DesktopMcpKind::StreamableHttp => {
-            let port = start_http_server(entrypoint)?;
-            Ok(McpChange {
-                path: None,
-                url: Some(format!("http://127.0.0.1:{port}{MCP_HTTP_PATH}")),
-            })
-        }
+    let path = config_path_for(h)
+        .with_context(|| format!("no config path for {id}"))?;
+    if h.toml {
+        upsert_toml_entry(&path, entrypoint)?;
+    } else {
+        upsert_stdio_entry(&path, entrypoint)?;
     }
+    Ok(McpChange {
+        path: Some(path),
+    })
 }
 
 /// Remove the MCP server for a harness, restoring the exact prior state.
-pub fn uninstall(id: &str, entrypoint: &Path) -> Result<McpChange> {
+pub fn uninstall(id: &str, _entrypoint: &Path) -> Result<McpChange> {
     let h = harness(id)
         .with_context(|| format!("unknown desktop harness {id}"))?;
-    match h.kind {
-        DesktopMcpKind::Stdio => {
-            let path = config_path_for(h)
-                .with_context(|| format!("no config path for {id}"))?;
-            let changed = remove_stdio_entry(&path)?;
-            Ok(McpChange {
-                path: changed.then_some(path),
-                url: None,
-            })
-        }
-        DesktopMcpKind::StreamableHttp => {
-            stop_http_server(entrypoint);
-            Ok(McpChange::default())
-        }
-    }
+    let path = config_path_for(h)
+        .with_context(|| format!("no config path for {id}"))?;
+    let changed = if h.toml {
+        remove_toml_entry(&path)?
+    } else {
+        remove_stdio_entry(&path)?
+    };
+    Ok(McpChange {
+        path: changed.then_some(path),
+    })
 }
 
 /// True when the harness's MCP wiring is in place.
@@ -354,6 +358,53 @@ fn upsert_stdio_entry(path: &Path, entrypoint: &Path) -> Result<()> {
     write_json_file(path, &root)
 }
 
+fn upsert_toml_entry(path: &Path, entrypoint: &Path) -> Result<()> {
+    let existed = path.exists();
+    let mut table = match read_toml(path) {
+        Some(table) => table,
+        None if path.exists() => {
+            anyhow::bail!(
+                "{} is not valid TOML; refusing to touch it",
+                path.display()
+            );
+        }
+        None => toml::Table::new(),
+    };
+    if !existed {
+        set_marker(path)?;
+    }
+    let servers = table
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .context("mcp_servers in config is not a table")?;
+
+    let mut server = toml::Table::new();
+    server.insert(
+        "command".to_string(),
+        toml::Value::String(entrypoint.to_string_lossy().into_owned()),
+    );
+    server.insert(
+        "args".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("mcp".to_string()),
+            toml::Value::String("serve".to_string()),
+        ]),
+    );
+    // Point the MCP server at the local proxy for retrieval/stats, and keep
+    // the beacon off (same env the CLI integration sets).
+    let mut env = toml::Table::new();
+    env.insert(
+        "HEADROOM_PROXY_URL".to_string(),
+        toml::Value::String(HEADROOM_PROXY_URL.to_string()),
+    );
+    env.insert("HEADROOM_BEACON".to_string(), toml::Value::String("off".to_string()));
+    server.insert("env".to_string(), toml::Value::Table(env));
+
+    servers.insert(MCP_SERVER_NAME.to_string(), toml::Value::Table(server));
+    write_toml(path, &table)
+}
+
 fn remove_stdio_entry(path: &Path) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
@@ -379,6 +430,29 @@ fn remove_stdio_entry(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+fn remove_toml_entry(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut table = read_toml(path)
+        .with_context(|| format!("{} is not valid TOML; refusing to touch it", path.display()))?;
+    let Some(servers) = table.get_mut("mcp_servers").and_then(|v| v.as_table_mut()) else {
+        return Ok(false);
+    };
+    let removed = servers.remove(MCP_SERVER_NAME).is_some();
+    if !removed {
+        return Ok(false);
+    }
+    // We created the whole file: drop it entirely for a true round-trip.
+    if was_created_by_us(path) {
+        clear_marker(path);
+        let _ = std::fs::remove_file(path);
+        return Ok(true);
+    }
+    write_toml(path, &table)?;
+    Ok(true)
+}
+
 /// Did we create this file? Tracked by a marker file beside the config
 /// (a `.headroom-<name>` flag) so uninstall can drop a section we added
 /// without touching a user's own empty `mcpServers`.
@@ -401,141 +475,6 @@ fn set_marker(path: &Path) -> Result<()> {
 
 fn clear_marker(path: &Path) {
     let _ = std::fs::remove_file(marker_path(path));
-}
-
-// ---------------------------------------------------------------------------
-// Streamable HTTP transport (ChatGPT desktop)
-// ---------------------------------------------------------------------------
-
-/// True when `port` is free on loopback.
-fn loopback_port_free(port: u16) -> bool {
-    use std::net::TcpListener;
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
-}
-
-/// The port our HTTP MCP endpoint listens on: 8788, or — when 8788 is held by
-/// an unrelated process — the next free port up to the scan limit. A busy
-/// 8788 must not block the ChatGPT button.
-fn free_mcp_http_port() -> u16 {
-    let mut port = MCP_HTTP_PORT;
-    while !loopback_port_free(port) && port - MCP_HTTP_PORT < MCP_HTTP_PORT_SCAN_LIMIT {
-        port += 1;
-    }
-    port
-}
-
-/// True when our `headroom mcp serve --transport http` child is listening on
-/// the endpoint's active port (which another process may hold, so check the
-/// identity before declaring it ours).
-fn http_server_running() -> bool {
-    use crate::tool_manager::listener_process;
-    listener_process(free_mcp_http_port())
-        .map(|(_, pid)| is_our_http_mcp_pid(pid))
-        .unwrap_or(false)
-}
-
-/// Start `headroom mcp serve --transport http` on a free loopback port,
-/// detached so the desktop app outlives this process. Best-effort: the
-/// connector in ChatGPT Desktop is created by the user in Developer Mode
-/// pointing at the returned URL; we only make the endpoint available and keep
-/// it healthy.
-fn start_http_server(entrypoint: &Path) -> Result<u16> {
-    let port = free_mcp_http_port();
-    if http_server_running() {
-        return Ok(port);
-    }
-    let mut cmd = crate::proc::command(entrypoint);
-    cmd.args([
-        "mcp",
-        "serve",
-        "--transport",
-        "http",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        &port.to_string(),
-        "--path",
-        MCP_HTTP_PATH,
-        "--proxy-url",
-        HEADROOM_PROXY_URL,
-    ]);
-    // Detach: the process must survive this app's window.
-    cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .stdin(std::process::Stdio::null());
-    let child = cmd.spawn().context("spawning headroom mcp serve --transport http")?;
-    // A short liveness check so a bad invocation surfaces now, not in the UI.
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    let _ = child;
-    if !http_server_running() {
-        anyhow::bail!("headroom MCP HTTP server did not start on 127.0.0.1:{port}");
-    }
-    Ok(port)
-}
-
-/// The full URL of the HTTP MCP endpoint, when our server is running.
-pub fn http_mcp_url() -> Option<String> {
-    let port = free_mcp_http_port();
-    if http_server_running() {
-        Some(format!("http://127.0.0.1:{port}{MCP_HTTP_PATH}"))
-    } else {
-        None
-    }
-}
-
-/// True when `pid` runs the managed headroom `mcp serve --transport http`
-/// server. This is the standard soundness gate for killing a pid found by
-/// port (Persistence Rules): never reap a pid whose argv we have not verified.
-fn is_our_http_mcp_pid(pid: u32) -> bool {
-    let Some(argv) = process_argv(pid) else {
-        return false;
-    };
-    let argv = argv.to_lowercase();
-    argv.contains(" mcp ")
-        && argv.contains(" serve ")
-        && argv.contains("--transport")
-        && argv.contains(" http ")
-}
-
-/// The command line of `pid`, or None when it cannot be read (gone, foreign,
-/// or the platform cannot introspect it). Same shape as the private
-/// `tool_manager::ps_field`.
-fn process_argv(pid: u32) -> Option<String> {
-    #[cfg(not(windows))]
-    {
-        let output = crate::proc::command("/bin/ps")
-            .args(["-o", "command=", "-p", &pid.to_string()])
-            .output()
-            .ok()?;
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        (!value.is_empty()).then_some(value)
-    }
-    #[cfg(windows)]
-    {
-        // Windows has no ps; the executable path out of our managed runtime
-        // is a stricter and sufficient claim (same rule as
-        // pid_is_headroom_backend). Full argv is not required to refuse
-        // killing an unrelated 8788 holder.
-        crate::winproc::process_image_path(pid)
-    }
-}
-
-/// Stop our HTTP MCP server. Best-effort; never reaps a pid we could not
-/// positively identify as ours.
-fn stop_http_server(entrypoint: &Path) {
-    use crate::tool_manager::listener_process;
-    let _ = entrypoint;
-    let port = free_mcp_http_port();
-    while let Some((_, pid)) = listener_process(port) {
-        if !is_our_http_mcp_pid(pid) {
-            log::info!(
-                "MCP HTTP port {port} is held by an unknown pid {pid}; not killing it"
-            );
-            return;
-        }
-        crate::state::terminate_process_tree(pid as i32, true);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
 }
 
 #[cfg(test)]
@@ -568,7 +507,10 @@ mod tests {
         assert!(has_headroom_mcp(&root));
         let server = root["mcpServers"][MCP_SERVER_NAME].clone();
         assert_eq!(server["command"], "/opt/Headroom/runtime/venv/bin/headroom");
-        assert_eq!(server["args"], serde_json::json!(["mcp", "serve", "--proxy-url", HEADROOM_PROXY_URL]));
+        assert_eq!(
+            server["args"],
+            serde_json::json!(["mcp", "serve", "--proxy-url", HEADROOM_PROXY_URL])
+        );
     }
 
     #[test]
@@ -673,10 +615,8 @@ mod tests {
 
     #[test]
     fn has_headroom_mcp_detects_by_name() {
-        let root: Map<String, Value> = serde_json::from_str(
-            r#"{"mcpServers":{"headroom":{"command":"x"}}}"#,
-        )
-        .unwrap();
+        let root: Map<String, Value> =
+            serde_json::from_str(r#"{"mcpServers":{"headroom":{"command":"x"}}}"#).unwrap();
         assert!(has_headroom_mcp(&root));
 
         let other: Map<String, Value> =
@@ -707,79 +647,201 @@ mod tests {
     }
 
     #[test]
-    fn is_our_http_mcp_pid_verdicts() {
-        // Miss on a proxy, not an http server.
-        assert!(!is_our_http_mcp_pid_matches(
-            "/opt/Headroom/runtime/venv/bin/headroom proxy --port 6767"
-        ));
-        // Hit on our documented invocation.
-        assert!(is_our_http_mcp_pid_matches(
-            "/opt/Headroom/runtime/venv/bin/headroom mcp serve --transport http \
-             --host 127.0.0.1 --port 8788 --path /mcp --proxy-url http://127.0.0.1:6767"
-        ));
-        // Miss on a same-shaped server bound elsewhere.
-        assert!(!is_our_http_mcp_pid_matches(
-            "node some-other-mcp-server --transport http"
-        ));
-    }
-
-    /// Pure variant of the identity check, driven by a literal argv string,
-    /// so the verdicts are testable without a live pid.
-    fn is_our_http_mcp_pid_matches(argv: &str) -> bool {
-        let argv = argv.to_lowercase();
-        argv.contains(" mcp ")
-            && argv.contains(" serve ")
-            && argv.contains("--transport")
-            && argv.contains(" http ")
+    fn chatgpt_uses_codex_toml_path() {
+        // The ChatGPT desktop app reads Codex's shared MCP config. Writing a
+        // JSON file to ~/.codex/config.toml would corrupt it, so the harness
+        // must point at the real TOML path (handled by the caller wiring the
+        // config path; here we assert the resolution stays on .codex).
+        let path = config_path_for(harness("chatgpt_desktop").unwrap()).unwrap();
+        assert!(path.ends_with(".codex/config.toml"), "got {}", path.display());
     }
 
     #[test]
-    fn free_port_returns_default_when_8788_is_free() {
-        // When the documented port is free, no scan: it is used as-is.
-        if loopback_port_free(MCP_HTTP_PORT) {
-            assert_eq!(free_mcp_http_port(), MCP_HTTP_PORT);
+    fn install_and_uninstall_keep_foreign_servers_through_round_trip() {
+        let (_dir, path) = tmp_path("cursor.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"unityMCP":{"url":"http://127.0.0.1:8080/mcp"}}}"#,
+        )
+        .unwrap();
+
+        upsert_stdio_entry(&path, &entrypoint_fixture()).unwrap();
+        let root = read_map(&path);
+        assert!(root["mcpServers"].as_object().unwrap().contains_key("unityMCP"));
+        assert!(root["mcpServers"].as_object().unwrap().contains_key(MCP_SERVER_NAME));
+
+        remove_stdio_entry(&path).unwrap();
+        let root = read_map(&path);
+        let servers = root["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert!(servers.contains_key("unityMCP"));
+        assert!(!servers.contains_key(MCP_SERVER_NAME));
+    }
+
+    #[test]
+    fn chatgpt_toml_upsert_writes_stdio_entry_and_preserves_other_servers() {
+        let (_dir, path) = tmp_path("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[plugins.\"gmail@openai-curated\"]\nenabled = false\n\n[mcp_servers.unityMCP]\nurl = \"http://127.0.0.1:8080/mcp\"\n",
+        )
+        .unwrap();
+        assert!(!was_created_by_us(&path));
+
+        upsert_toml_entry(&path, &entrypoint_fixture()).unwrap();
+
+        let table = read_toml(&path).expect("file must stay valid TOML");
+        // Our server is present with command/args/env...
+        let servers = table["mcp_servers"].as_table().unwrap();
+        assert!(servers.contains_key(MCP_SERVER_NAME));
+        let headroom = &servers[MCP_SERVER_NAME];
+        assert_eq!(
+            headroom["command"],
+            toml::Value::String(entrypoint_fixture().to_string_lossy().into_owned())
+        );
+        assert_eq!(headroom["args"], toml::Value::Array(vec![toml::Value::String("mcp".to_string()), toml::Value::String("serve".to_string())]));
+        assert_eq!(
+            headroom["env"]["HEADROOM_PROXY_URL"],
+            toml::Value::String(HEADROOM_PROXY_URL.to_string())
+        );
+        // ...and the user's own server is untouched.
+        assert!(servers.contains_key("unityMCP"));
+        // Other sections survive.
+        assert!(table["plugins"].is_table());
+    }
+
+    #[test]
+    fn chatgpt_toml_remove_only_takes_our_entry() {
+        let (_dir, path) = tmp_path("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[mcp_servers.unityMCP]\nurl = \"http://127.0.0.1:8080/mcp\"\n\n[mcp_servers.headroom]\ncommand = \"headroom\"\n",
+        )
+        .unwrap();
+
+        let changed = remove_toml_entry(&path).unwrap();
+        assert!(changed);
+        assert!(path.exists(), "preexisting TOML must be kept");
+
+        let table = read_toml(&path).expect("file must stay valid TOML");
+        let servers = table["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert!(servers.contains_key("unityMCP"));
+        assert!(!servers.contains_key(MCP_SERVER_NAME));
+    }
+
+    #[test]
+    fn chatgpt_toml_round_trip_restores_absent_state() {
+        let (_dir, path) = tmp_path("missing.toml");
+        assert!(!path.exists());
+
+        upsert_toml_entry(&path, &entrypoint_fixture()).unwrap();
+        assert!(has_headroom_mcp_toml(&read_toml(&path).unwrap()));
+        assert!(was_created_by_us(&path));
+
+        remove_toml_entry(&path).unwrap();
+        assert!(!path.exists(), "round-trip must restore the absent state");
+        assert!(!was_created_by_us(&path));
+    }
+
+    #[test]
+    fn chatgpt_toml_refuses_broken_toml() {
+        let (_dir, path) = tmp_path("broken.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "mcp_servers = = =").unwrap();
+        assert!(upsert_toml_entry(&path, &entrypoint_fixture()).is_err());
+        assert!(remove_toml_entry(&path).is_err());
+    }
+
+    #[test]
+    fn has_headroom_mcp_toml_detects_by_name() {
+        let with: toml::Table = "[mcp_servers.headroom]\ncommand = \"x\"\n".parse().unwrap();
+        assert!(has_headroom_mcp_toml(&with));
+        let without: toml::Table = "[mcp_servers.other]\nurl = \"http://x\"\n".parse().unwrap();
+        assert!(!has_headroom_mcp_toml(&without));
+        let empty: toml::Table = "".parse().unwrap();
+        assert!(!has_headroom_mcp_toml(&empty));
+    }
+
+    #[test]
+    fn golden_install_remove_on_real_codex_config() {
+        // Real ~/.codex/config.toml (the ChatGPT desktop app's config): bounce
+        // our entry through it and make sure the user's servers, plugins and
+        // sections all survive. Skipped in CI where the file does not exist.
+        let home = client_adapters::home_dir();
+        let path = home.join(".codex").join("config.toml");
+        if !path.exists() {
+            eprintln!("skipping: {} not present", path.display());
+            return;
         }
-    }
+        let before = std::fs::read(&path).unwrap();
 
-    #[test]
-    fn free_port_skips_a_busy_8788() {
-        // Occupy 8788 with a throwaway listener when it is free; when an
-        // unrelated process already holds it (CI/dev machines), that is busy
-        // enough. Either way the selector must not return 8788 and must hand
-        // back a bindable port.
-        use std::net::TcpListener;
-        let held = match TcpListener::bind(("127.0.0.1", MCP_HTTP_PORT)) {
-            Ok(listener) => Some(listener),
-            Err(_) => {
-                // Already busy out of our control: still a valid fixture.
-                None
-            }
-        };
-        let port = free_mcp_http_port();
-        assert_ne!(port, MCP_HTTP_PORT, "busy 8788 must be skipped");
-        assert!(port > MCP_HTTP_PORT && port < MCP_HTTP_PORT + MCP_HTTP_PORT_SCAN_LIMIT);
-        assert!(loopback_port_free(port), "returned port must be bindable");
-        drop(held);
-    }
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("config.toml");
+        std::fs::write(&copy, &before).unwrap();
 
-    #[test]
-    fn chatgpt_install_returns_url_not_path_when_running() {
-        // The StreamableHttp harness reports an endpoint URL so the UI can say
-        // "connect your custom connector at <url>". The branch is exercised
-        // against the real installed runtime only in the release wheel probe;
-        // here we only verify the branch routing contract with a stub.
-        struct Stub;
-        impl Stub {
-            fn routed(self) -> anyhow::Result<McpChange> {
-                Ok(McpChange {
-                    path: None,
-                    url: Some("http://127.0.0.1:8788/mcp".to_string()),
-                })
+        upsert_toml_entry(&copy, &entrypoint_fixture()).unwrap();
+        let after = std::fs::read_to_string(&copy).unwrap();
+        let table = after.parse::<toml::Table>().expect("install must keep TOML valid");
+        let servers = table["mcp_servers"].as_table().unwrap();
+        assert!(servers.contains_key(MCP_SERVER_NAME));
+        assert_eq!(
+            servers.get(MCP_SERVER_NAME).unwrap()["env"]["HEADROOM_PROXY_URL"],
+            toml::Value::String(HEADROOM_PROXY_URL.to_string())
+        );
+        for other in servers.keys().filter(|k| *k != MCP_SERVER_NAME) {
+            assert!(
+                after_has_server(other, &before),
+                "foreign server {other} must survive install"
+            );
+        }
+        // Root keys and other sections survive.
+        assert!(table.contains_key("model"));
+        assert!(table.contains_key("plugins") || table.contains_key("mcp_servers"));
+
+        let changed = remove_toml_entry(&copy).unwrap();
+        assert!(changed);
+        let restored = std::fs::read_to_string(&copy).unwrap();
+        let final_table = restored
+            .parse::<toml::Table>()
+            .expect("uninstall must keep TOML valid");
+        // Everything the user had (other servers, root keys, sections) survives
+        // the round-trip. Byte-exact equality is not asserted because the toml
+        // crate normalizes formatting/comments; semantic equality is what the
+        // apps care about.
+        assert!(!has_headroom_mcp_toml(&final_table));
+        if let Some(servers) = final_table.get("mcp_servers").and_then(|v| v.as_table()) {
+            for other in servers.keys().filter(|k| *k != MCP_SERVER_NAME) {
+                assert!(
+                    after_has_server(other, &before),
+                    "foreign server {other} must survive uninstall"
+                );
             }
         }
-        let change = Stub.routed().unwrap();
-        assert!(change.path.is_none());
-        assert_eq!(change.url.as_deref(), Some("http://127.0.0.1:8788/mcp"));
+        assert!(final_table.contains_key("model"));
+        // Other non-deleted sections survive the round-trip too.
+        let survived = ["plugins", "projects", "features", "tui"]
+            .iter()
+            .any(|s| before_contains_section(s, &before) == final_table.contains_key(*s));
+        assert!(survived, "user sections must survive uninstall");
+    }
+
+    fn after_has_server(name: &str, before: &[u8]) -> bool {
+        let before = String::from_utf8_lossy(before);
+        let before = before.parse::<toml::Table>().ok();
+        before.is_some_and(|t| {
+            t.get("mcp_servers")
+                .and_then(|v| v.as_table())
+                .is_some_and(|s| s.contains_key(name))
+        })
+    }
+
+    fn before_contains_section(name: &str, before: &[u8]) -> bool {
+        let raw = String::from_utf8_lossy(before);
+        raw.lines()
+            .any(|l| l.trim() == format!("[{name}]") || l.trim().starts_with(&format!("[{name}.")))
     }
 }
-

@@ -514,13 +514,13 @@ pub struct DesktopMcpStatus {
     pub mcp_configured: bool,
 }
 
-/// Result of a desktop MCP install/uninstall: which config file was updated
-/// and/or the endpoint URL a remote-only harness (ChatGPT Desktop) should use.
+/// Result of a desktop MCP install/uninstall: which config file was updated.
+/// The ChatGPT desktop app is a stdio entry in `~/.codex/config.toml` (shared
+/// with Codex), so there is no separate URL to report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopMcpChangeResponse {
     pub path: Option<String>,
-    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

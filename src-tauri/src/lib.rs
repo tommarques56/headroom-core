@@ -4895,9 +4895,9 @@ fn detect_desktop_mcp() -> Vec<DesktopMcpStatus> {
     desktop_mcp::detect()
 }
 
-/// Install the Headroom MCP server into a desktop harness's config, or start
-/// the Streamable HTTP endpoint for ChatGPT Desktop. `entrypoint` comes from
-/// the managed runtime so GUI-launched apps can start the server.
+/// Install the Headroom MCP server into a desktop harness's config (JSON for
+/// Claude Desktop / Cursor, TOML for the ChatGPT desktop app). `entrypoint`
+/// comes from the managed runtime so GUI-launched apps can start the server.
 #[tauri::command]
 fn install_desktop_mcp(
     state: State<'_, AppState>,
@@ -4907,12 +4907,10 @@ fn install_desktop_mcp(
     let change = desktop_mcp::install(&id, &entrypoint).map_err(|err| err.to_string())?;
     Ok(DesktopMcpChangeResponse {
         path: change.path.map(|p| p.to_string_lossy().into_owned()),
-        url: change.url,
     })
 }
 
-/// Remove the Headroom MCP server from a desktop harness's config, or stop
-/// the Streamable HTTP endpoint for ChatGPT Desktop.
+/// Remove the Headroom MCP server from a desktop harness's config.
 #[tauri::command]
 fn uninstall_desktop_mcp(
     state: State<'_, AppState>,
@@ -4922,7 +4920,6 @@ fn uninstall_desktop_mcp(
     let change = desktop_mcp::uninstall(&id, &entrypoint).map_err(|err| err.to_string())?;
     Ok(DesktopMcpChangeResponse {
         path: change.path.map(|p| p.to_string_lossy().into_owned()),
-        url: change.url,
     })
 }
 

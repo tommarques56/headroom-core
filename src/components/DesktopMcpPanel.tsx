@@ -15,7 +15,7 @@ const HARNESS_HELP: Record<string, string> = {
   cursor:
     "Registers headroom as a global MCP server in Cursor, available in every project.",
   chatgpt_desktop:
-    "Starts Headroom's Streamable HTTP MCP endpoint for ChatGPT Desktop. Connect to it in ChatGPT's Developer Mode with a custom connector.",
+    "Registers headroom as an MCP server for the ChatGPT desktop app (shared with Codex config), so ChatGPT can compress content on demand.",
 };
 
 export function DesktopMcpPanel() {
@@ -47,19 +47,12 @@ export function DesktopMcpPanel() {
     setMessage(null);
     const target = row.mcpConfigured ? "uninstall" : "install";
     try {
-      const change = await invoke<{ path?: string; url?: string }>(
-        `${target}_desktop_mcp`,
-        { id: row.clientId },
-      );
-      const detail =
-        target === "install" && change.url
-          ? ` Connect ChatGPT's custom connector to: ${change.url}`
-          : "";
+      await invoke<{ path?: string }>(`${target}_desktop_mcp`, { id: row.clientId });
       setMessage({
         id: row.clientId,
         text:
           target === "install"
-            ? `${row.name}: Headroom MCP installed. Restart the app to pick it up.${detail}`
+            ? `${row.name}: Headroom MCP installed. Restart the app to pick it up.`
             : `${row.name}: Headroom MCP removed.`,
         error: false,
       });

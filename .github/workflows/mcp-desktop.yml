@@ -7,9 +7,11 @@ name: MCP Desktop
 #
 # None of the runners install the desktop apps, so this validates the pure
 # logic: the Rust unit tests drive the config write/restore/delete round-trips
-# against temp files, and the frontend tests drive the manager panel against a
-# mocked invoke. The real `headroom mcp serve --transport http` smoke test
-# lives on, guarded by a marker, and is exercised by the release workflows.
+# against temp files (plus a golden round-trip against ~/.codex/config.toml
+# when present), and the frontend tests drive the manager panel against a
+# mocked invoke. No smoke test over a live transport is needed: every harness
+# is wired via its config file (JSON for Claude/Cursor, TOML stdio for the
+# ChatGPT desktop app via the shared Codex config).
 
 on:
   push:
