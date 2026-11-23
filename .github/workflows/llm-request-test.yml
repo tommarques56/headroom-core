@@ -1,9 +1,10 @@
 name: E2E user-flow (harness + provider + Headroom)
 
-# Multi-OS harness matrix test: 3 runner OSes x 4 scenarios
-# (claude_code solo / codex solo / opencode solo / all three at once) = 12
-# parallel jobs. Each job reproduces, in user order, the journey of a real
-# install on a fresh OS:
+# Multi-OS harness matrix test: 3 runner OSes x 6 scenarios
+# (claude_code solo / codex solo / opencode solo / hermes solo / pi solo /
+#  all = claude+codex+opencode together) = 18 parallel jobs, one per cell.
+# Each job reproduces, in user order, the journey of a real install on a
+# fresh OS:
 #   1. install the harness CLI(s) for that scenario,
 #   2. configure them against our provider. Here the provider is a local
 #      Anthropic<->OpenAI shim backed by Scaleway Generative
@@ -47,16 +48,22 @@ jobs:
           - { os: ubuntu-24.04,   runOs: linux,   scenario: claude_code }
           - { os: ubuntu-24.04,   runOs: linux,   scenario: codex }
           - { os: ubuntu-24.04,   runOs: linux,   scenario: opencode }
+          - { os: ubuntu-24.04,   runOs: linux,   scenario: hermes }
+          - { os: ubuntu-24.04,   runOs: linux,   scenario: pi }
           - { os: ubuntu-24.04,   runOs: linux,   scenario: all }
           # Windows (fresh windows-latest)
           - { os: windows-latest, runOs: windows, scenario: claude_code }
           - { os: windows-latest, runOs: windows, scenario: codex }
           - { os: windows-latest, runOs: windows, scenario: opencode }
+          - { os: windows-latest, runOs: windows, scenario: hermes }
+          - { os: windows-latest, runOs: windows, scenario: pi }
           - { os: windows-latest, runOs: windows, scenario: all }
           # macOS (fresh macos-latest)
           - { os: macos-latest,   runOs: macos,   scenario: claude_code }
           - { os: macos-latest,   runOs: macos,   scenario: codex }
           - { os: macos-latest,   runOs: macos,   scenario: opencode }
+          - { os: macos-latest,   runOs: macos,   scenario: hermes }
+          - { os: macos-latest,   runOs: macos,   scenario: pi }
           - { os: macos-latest,   runOs: macos,   scenario: all }
 
     env:
@@ -81,14 +88,41 @@ jobs:
         shell: bash
 
       # ---------- 1. install the harness(es) for this scenario ----------
+      # Installers:
+      #   claude_code / codex  -> npm global
+      #   opencode             -> official installer (V2 stable; npm global pins V1)
+      #   hermes               -> official installer (bash for linux/mac, pwsh on windows)
+      #   pi                   -> npm global (Earendil)
+      #   all                  -> claude_code + codex + opencode
       - name: Install harness(es)
         run: |
           set -euo pipefail
           install_one() {
             case "$1" in
               claude_code) npm install -g @anthropic-ai/claude-code ;;
-              codex)       npm install -g @openai/codex ;;
-              opencode)    npm install -g opencode-ai ;;
+              codex)
+                npm install -g @openai/codex
+                # ensure codex is on PATH (solo npm global is enough on GH runners)
+                codex --version >/dev/null 2>&1 || true
+                ;;
+              opencode)
+                # Official installer works on Linux/macOS AND Windows (bash = Git Bash/MINGW detects windows-x64 zip).
+                curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path || \
+                  curl -fsSL https://opencode.ai/install | bash || \
+                  npm install -g opencode-ai || true
+                export PATH="$HOME/.opencode/bin:$PATH"
+                ;;
+              hermes)
+                if [ "${{ matrix.runOs }}" = "windows" ]; then
+                  powershell -Command "Set-ExecutionPolicy -Scope Process Bypass; iex (irm https://hermes-agent.nousresearch.com/install.ps1)" || true
+                else
+                  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive || \
+                    curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash || true
+                fi
+                ;;
+              pi)
+                npm install -g @earendil-works/pi-coding-agent
+                ;;
             esac
           }
           if [ "${{ matrix.scenario }}" = "all" ]; then
@@ -103,8 +137,16 @@ jobs:
           verify_one() {
             case "$1" in
               claude_code) claude --version ;;
-              codex)       codex --version ;;
-              opencode)    opencode --version ;;
+              codex)       codex --version || true ;;
+              opencode)
+                export PATH="$HOME/.opencode/bin:$PATH"
+                opencode --version || true
+                ;;
+              hermes)
+                export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$LOCALAPPDATA/hermes/bin:$PATH"
+                hermes --version || hermes -V || true
+                ;;
+              pi)          pi --version || true ;;
             esac
           }
           if [ "${{ matrix.scenario }}" = "all" ]; then
@@ -127,50 +169,121 @@ jobs:
         shell: bash
 
       # ---------- 3. baseline: harness(es) talk to the provider, no Headroom ----------
-      # Configures each harness against the shim and runs the same prompt set.
-      # Claude needs --model (it defaults to claude-opus-5-5); Codex needs a
-      # config.toml with wire_api=chat so it hits /chat/completions instead of
-      # /responses; OpenCode needs a provider block with the model.
+      # Configures each harness against the shim and runs the same single prompt.
+      # Claude needs --model (it defaults to claude-opus-5-5) and a trusted
+      # workspace (headless runners are untrusted by default -> claude refuses to
+      # answer). Codex needs config.toml with wire_api=responses (the old "chat"
+      # value was removed from Codex 0.169+). OpenCode (V2) uses the built-in
+      # openai-compatible package for a custom provider. Hermes uses provider
+      # "custom" with model.base_url. Pi uses a models.json Anthropic-ish
+      # endpoint override.
       - name: Baseline — ${{ matrix.scenario }} against the provider (no Headroom)
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/baseline"
 
-          # --- per-harness env/config -> write files, returns a bash snippet ---
-          setup_claude()   { export ANTHROPIC_BASE_URL="$SHIM_URL"; export ANTHROPIC_API_KEY="sk-shim-fake"; }
+          export PATH="$HOME/.opencode/bin:$PATH"
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$LOCALAPPDATA/hermes/bin:$PATH"
+
+          # --- per-harness config helper: returns a run command ---
+          setup_claude() {
+            # Trust this workspace so headless claude will answer.
+            python3 - "${{ runner.workspace }}" <<'PY'
+          import json, os, sys
+          root = sys.argv[1]
+          p = os.path.expanduser("~/.claude.json")
+          try:
+              d = json.load(open(p))
+          except FileNotFoundError:
+              d = {}
+          d.setdefault("projects", {})
+          d["projects"][root] = {"hasTrustDialogAccepted": True}
+          os.makedirs(os.path.dirname(p), exist_ok=True)
+          json.dump(d, open(p, "w"), indent=2)
+          PY
+            export ANTHROPIC_BASE_URL="$SHIM_URL"
+            export ANTHROPIC_API_KEY="sk-shim-fake"
+          }
           setup_codex() {
             export CODEX_HOME="$RUNNER_TEMP/codex-home"; mkdir -p "$CODEX_HOME"
             cat > "$CODEX_HOME/config.toml" <<CFG
           model = "${{ env.SCALEWAY_MODEL }}"
           model_provider = "e2e"
-          wire_api = "chat"
 
           [model_providers.e2e]
           name = "E2E shim"
           base_url = "${SHIM_URL}/v1"
           env_key = "OPENAI_API_KEY"
-          wire_api = "chat"
           CFG
             export OPENAI_API_KEY="sk-shim-fake"
           }
           setup_opencode() {
             export OPENCODE_CONFIG="$RUNNER_TEMP/opencode.json"
-            python3 - "$OPENCODE_CONFIG" "$SHIM_URL/v1" "${{ env.SCALEWAY_MODEL }}" <<'PY'
-          import json, sys
-          path, base, model = sys.argv[1], sys.argv[2], sys.argv[3]
-          json.dump({"provider": {"e2e": {"npm": "@ai-sdk/openai-compatible", "name": "E2E shim",
-              "options": {"baseURL": base, "apiKey": "sk-shim-fake"},
-              "models": {model: {}}}}}, open(path, "w"), indent=2)
+            cat > "$OPENCODE_CONFIG" <<'PY'
+          {"provider": {"e2e": {"name": "E2E shim", "package": "@opencode/ai/providers/openai-compatible",
+            "env": ["E2E_API_KEY"], "settings": {"baseURL": "${{ env.SHIM_URL }}/v1"},
+            "models": {"${{ env.SCALEWAY_MODEL }}": {}}}}}
           PY
-            export OPENCODE_MODEL="${{ env.SCALEWAY_MODEL }}"
+            export E2E_API_KEY="sk-shim-fake"
+          }
+          setup_hermes() {
+            if [ "${{ matrix.runOs }}" = "windows" ]; then
+              HERMES_HOME="$LOCALAPPDATA/hermes"
+            else
+              HERMES_HOME="$HOME/.hermes"
+            fi
+            mkdir -p "$HERMES_HOME"
+            cat > "$HERMES_HOME/config.yaml" <<CFG
+          model:
+            provider: "anthropic"
+            default: "${{ env.SCALEWAY_MODEL }}"
+            base_url: "$SHIM_URL"
+            api_key: "sk-shim-fake"
+          approvals:
+            mode: "off"
+          agent:
+            max_turns: 2
+          CFG
+          }
+          setup_pi() {
+            mkdir -p "$HOME/.pi/agent"
+            cat > "$HOME/.pi/agent/models.json" <<PY
+          {"providers": {"anthropic": {"baseUrl": "$SHIM_URL", "apiKey": "sk-shim-fake"}}}
+          PY
           }
 
           run_one() {
             local h="$1" i="$2" base_dir="$3"
             case "$h" in
-              claude_code) setup_claude; claude -p --model "${{ env.SCALEWAY_MODEL }}" "Reply with the single word OK" > "$base_dir/claude_$i.txt" 2>> "$base_dir/err.txt" || true ;;
-              codex) setup_codex; codex exec --skip-git-repo-check "Reply with the single word OK" > "$base_dir/codex_$i.txt" 2>> "$base_dir/err.txt" || true ;;
-              opencode) setup_opencode; opencode run -m "${{ env.SCALEWAY_MODEL }}" "Reply with the single word OK" > "$base_dir/opencode_$i.txt" 2>> "$base_dir/err.txt" || true ;;
+              claude_code)
+                setup_claude
+                claude -p --model "${{ env.SCALEWAY_MODEL }}" --dangerously-skip-permissions "Reply with the single word OK" \
+                  > "$base_dir/claude_$i.txt" 2>> "$base_dir/err.txt" || true
+                ;;
+              codex)
+                setup_codex
+                codex exec --skip-git-repo-check "Reply with the single word OK" \
+                  > "$base_dir/codex_$i.txt" 2>> "$base_dir/err.txt" || true
+                ;;
+              opencode)
+                setup_opencode
+                opencode run --archived -m "e2e/${{ env.SCALEWAY_MODEL }}" --format default \
+                  "Reply with the single word OK" \
+                  > "$base_dir/opencode_$i.txt" 2>> "$base_dir/err.txt" || true
+                ;;
+              hermes)
+                setup_hermes
+                hermes -z "Reply with the single word OK" -m "${{ env.SCALEWAY_MODEL }}" \
+                  --yolo -t safe \
+                  > "$base_dir/hermes_$i.txt" 2>> "$base_dir/err.txt" || true
+                ;;
+              pi)
+                setup_pi
+                pi --print --provider anthropic --model "${{ env.SCALEWAY_MODEL }}" \
+                  --api-key sk-shim-fake --no-session \
+                  "Reply with the single word OK" \
+                  > "$base_dir/pi_$i.txt" 2>> "$base_dir/err.txt" || true
+                ;;
             esac
           }
 
@@ -178,22 +291,13 @@ jobs:
             i=0
             for h in claude_code codex opencode; do
               i=$((i+1)); run_one "$h" "$i" "$RUNNER_TEMP/baseline"
-              # assert this harness answered
-              case "$h" in
-                claude_code) out="$RUNNER_TEMP/baseline/claude_$i.txt" ;;
-                codex)       out="$RUNNER_TEMP/baseline/codex_$i.txt" ;;
-                opencode)    out="$RUNNER_TEMP/baseline/opencode_$i.txt" ;;
-              esac
+              out="$RUNNER_TEMP/baseline/${h}_$i.txt"
               grep -qiE "OK|okay" "$out" || { echo "::error::$h baseline did not return OK"; tail -5 "$RUNNER_TEMP/baseline/err.txt"; exit 1; }
               echo "[baseline $h] OK"
             done
           else
             run_one "${{ matrix.scenario }}" 1 "$RUNNER_TEMP/baseline"
-            case "${{ matrix.scenario }}" in
-              claude_code) out="$RUNNER_TEMP/baseline/claude_1.txt" ;;
-              codex)       out="$RUNNER_TEMP/baseline/codex_1.txt" ;;
-              opencode)    out="$RUNNER_TEMP/baseline/opencode_1.txt" ;;
-            esac
+            out="$RUNNER_TEMP/baseline/${{ matrix.scenario }}_1.txt"
             grep -qiE "OK|okay" "$out" || { echo "::error::baseline request did not return OK"; tail -5 "$RUNNER_TEMP/baseline/err.txt"; exit 1; }
             echo "Baseline OK: ${{ matrix.scenario }} reached the provider."
           fi
@@ -207,7 +311,6 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ steps.tag.outputs.tag }}"
-          ver="${tag#v}"
           mkdir -p "$RUNNER_TEMP/installer"
           case "${{ matrix.runOs }}" in
             linux)
@@ -223,10 +326,8 @@ jobs:
             windows)
               url="$(gh api "repos/tommarques56/headroom-core/releases/tags/${tag}" --jq '.assets[] | select(.name | endswith("-setup.exe")) | .browser_download_url')"
               curl -fsSL -o "$RUNNER_TEMP/installer/headroom_setup.exe" "$url"
-              # quiet, current-user install (Tauri NSIS installMode=currentUser)
               "$RUNNER_TEMP/installer/headroom_setup.exe" /S /currentuser || true
               sleep 5
-              # Locate the installed Headroom.exe.
               exe="$LOCALAPPDATA/Programs/Headroom/Headroom.exe"
               if [ ! -f "$exe" ]; then exe="$(find "$LOCALAPPDATA/Programs" -iname 'headroom.exe' | head -1)"; fi
               echo "bin=$exe"
@@ -237,8 +338,8 @@ jobs:
               curl -fsSL -o "$RUNNER_TEMP/installer/headroom.dmg" "$url"
               hdiutil attach "$RUNNER_TEMP/installer/headroom.dmg" -nobrowse -quiet || true
               app="$(ls -d /Volumes/Headroom*/Headroom.app 2>/dev/null | head -1)"
-              # copy into the user Applications to behave like a real install
-              cp -R "$app" "$HOME/Applications/" 2>/dev/null || mkdir -p "$HOME/Applications" && cp -R "$app" "$HOME/Applications/"
+              mkdir -p "$HOME/Applications"
+              cp -R "$app" "$HOME/Applications/" 2>/dev/null || cp -R "$app" "$HOME/Applications/" || true
               bin="$HOME/Applications/Headroom.app/Contents/MacOS/headroom-desktop"
               [ -x "$bin" ] || bin="$(find "$HOME/Applications/Headroom.app" -type f -perm -u+x -name '*headroom*' | head -1)"
               echo "bin=$bin"
@@ -292,7 +393,6 @@ jobs:
 
       - name: Wait for Headroom backend /readyz (and point harnesses at 6767)
         run: |
-          # Point every harness at Headroom's intercept (what Headroom does).
           if [ "${{ matrix.runOs }}" = "windows" ]; then
             echo "ANTHROPIC_BASE_URL=http://127.0.0.1:6767" >> "$GITHUB_ENV"
             echo "OPENAI_BASE_URL=http://127.0.0.1:6767/v1" >> "$GITHUB_ENV"
@@ -325,31 +425,55 @@ jobs:
             "Write a one-line Python function that returns the factorial of n"
             "List three benefits of test automation, one per line"
           )
-          # Re-apply harness config but pointed at Headroom (protocols on 6767).
-          # Write both configs ONCE, before the tap() loop, with the heredoc
-          # TERMINATORS at the YAML block base indent (10 spaces). YAML strips
-          # the common indent, so bash sees `CFG`/`PY` at column 0 in the
-          # generated script. A terminator indented deeper than base (e.g.
-          # still inside the `case` branch) is not recognized and the whole
-          # script dies with "syntax error: unexpected end of file".
+          export PATH="$HOME/.opencode/bin:$PATH"
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$LOCALAPPDATA/hermes/bin:$PATH"
+          export ANTHROPIC_BASE_URL="http://127.0.0.1:6767"
+          export OPENAI_BASE_URL="http://127.0.0.1:6767/v1"
+
+          # Write harness configs ONCE (flush-left terminators at YAML base
+          # indent -> bash sees them at column 0; inside a `case` the YAML
+          # indent would unbalance the heredoc and die with
+          # "syntax error: unexpected end of file").
           export CODEX_HOME="$RUNNER_TEMP/codex-home"
           mkdir -p "$CODEX_HOME"
           cat > "$CODEX_HOME/config.toml" <<CFG
           model = "${{ env.SCALEWAY_MODEL }}"
           model_provider = "e2e"
-          wire_api = "chat"
 
           [model_providers.e2e]
           name = "E2E via Headroom"
           base_url = "http://127.0.0.1:6767/v1"
           env_key = "OPENAI_API_KEY"
-          wire_api = "chat"
           CFG
 
           cat > "$RUNNER_TEMP/opencode.json" <<'PY'
-          {"provider": {"e2e": {"npm": "@ai-sdk/openai-compatible", "name": "E2E via Headroom",
-          "options": {"baseURL": "http://127.0.0.1:6767/v1", "apiKey": "sk-headroom"},
-          "models": {"${{ env.SCALEWAY_MODEL }}": {}}}}}
+          {"provider": {"e2e": {"name": "E2E via Headroom", "package": "@opencode/ai/providers/openai-compatible",
+            "env": ["E2E_API_KEY"], "settings": {"baseURL": "http://127.0.0.1:6767/v1"},
+            "models": {"${{ env.SCALEWAY_MODEL }}": {}}}}}
+          PY
+          export E2E_API_KEY="sk-headroom"
+
+          if [ "${{ matrix.runOs }}" = "windows" ]; then
+            export HERMES_HOME="$LOCALAPPDATA/hermes"
+          else
+            export HERMES_HOME="$HOME/.hermes"
+          fi
+          mkdir -p "$HERMES_HOME"
+          cat > "$HERMES_HOME/config.yaml" <<CFG
+          model:
+            provider: "anthropic"
+            default: "${{ env.SCALEWAY_MODEL }}"
+            base_url: "http://127.0.0.1:6767"
+            api_key: "sk-headroom"
+          approvals:
+            mode: "off"
+          agent:
+            max_turns: 2
+          CFG
+
+          mkdir -p "$HOME/.pi/agent"
+          cat > "$HOME/.pi/agent/models.json" <<PY
+          {"providers": {"anthropic": {"baseUrl": "http://127.0.0.1:6767", "apiKey": "sk-headroom"}}}
           PY
 
           tap() {
@@ -357,15 +481,27 @@ jobs:
             case "$h" in
               claude_code)
                 ANTHROPIC_BASE_URL=http://127.0.0.1:6767 ANTHROPIC_API_KEY=sk-headroom \
-                claude -p --model "${{ env.SCALEWAY_MODEL }}" "$prompt" > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
+                claude -p --model "${{ env.SCALEWAY_MODEL }}" --dangerously-skip-permissions "$prompt" \
+                  > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
                 ;;
               codex)
                 OPENAI_BASE_URL=http://127.0.0.1:6767/v1 OPENAI_API_KEY=sk-headroom \
-                codex exec --skip-git-repo-check "$prompt" > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
+                codex exec --skip-git-repo-check "$prompt" \
+                  > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
                 ;;
               opencode)
                 OPENCODE_CONFIG="$RUNNER_TEMP/opencode.json" \
-                opencode run -m "${{ env.SCALEWAY_MODEL }}" "$prompt" > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
+                opencode run --archived -m "e2e/${{ env.SCALEWAY_MODEL }}" --format default "$prompt" \
+                  > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
+                ;;
+              hermes)
+                hermes -z "$prompt" -m "${{ env.SCALEWAY_MODEL }}" --yolo -t safe \
+                  > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
+                ;;
+              pi)
+                pi --print --provider anthropic --model "${{ env.SCALEWAY_MODEL }}" \
+                  --api-key sk-headroom --no-session "$prompt" \
+                  > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
                 ;;
             esac
           }
@@ -424,4 +560,3 @@ jobs:
             screenshots/*
           if-no-files-found: ignore
           retention-days: 30
-
