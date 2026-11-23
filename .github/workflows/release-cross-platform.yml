@@ -118,13 +118,27 @@ jobs:
           done
           ls -la release-assets/
 
-      - name: Upload to GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*
-          append_body: true
+      - name: Delete existing Windows assets from the release
+        # Makes re-dispatches idempotent: an upload fails on an existing asset,
+        # so remove any prior Headroom_*x64 artifact before uploading the new one.
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          for name in "Headroom_${version}_x64-setup.exe" "Headroom_${version}_x64-setup.exe.sig"; do
+            gh release delete-asset "$tag" "$name" --yes 2>/dev/null || true
+          done
+
+      - name: Upload to GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Upload as workflow artifact
         uses: actions/upload-artifact@v4
