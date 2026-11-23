@@ -130,8 +130,6 @@ jobs:
             echo "Release $tag not found; creating it now." >&2
             gh release create "$tag" release-assets/* --title "$tag" --notes "Headroom core build ${version}" --repo "$GITHUB_REPOSITORY"
           }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload DMG as workflow artifact
         uses: actions/upload-artifact@v4
