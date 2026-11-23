@@ -175,4 +175,21 @@ jobs:
           curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz"
           echo
           echo "Backend smoke OK"
+          # Capture the app window into ./screenshots (user-requested location).
+          mkdir -p screenshots
+          if command -v screencapture >/dev/null 2>&1; then
+            screencapture -x "screenshots/macos-headroom.png" \
+              && echo "Screenshot -> screenshots/macos-headroom.png" || echo "screencapture failed"
+          else
+            echo "screencapture not available — skipping macOS screenshot"
+          fi
           kill "$app_pid" 2>/dev/null || true
+
+      - name: Upload smoke screenshots (macOS)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-screenshots-macos
+          path: screenshots/*
+          if-no-files-found: ignore
+          retention-days: 30

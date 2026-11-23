@@ -170,6 +170,16 @@ jobs:
           SHIM_URL: "http://127.0.0.1:${{ env.SHIM_PORT }}"
         run: |
           mkdir -p "$RUNNER_TEMP/baseline"
+          # Write the OpenCode provider config with python (no heredoc: a
+          # heredoc's terminator inside a GitHub case block breaks the script).
+          python3 - "$RUNNER_TEMP/opencode.json" "$SHIM_URL/v1" "${{ env.SCALEWAY_MODEL }}" <<'PY'
+          import json, sys
+          path, base, model = sys.argv[1], sys.argv[2], sys.argv[3]
+          json.dump({"provider": {"headroom": {"npm": "@ai-sdk/openai-compatible", "name": "Shim",
+              "options": {"baseURL": base, "apiKey": "sk-shim-fake"},
+              "models": {model: {}}}}}, open(path, "w"), indent=2)
+          print("wrote", path)
+          PY
           case "${{ matrix.harness }}" in
             claude_code)
               export ANTHROPIC_BASE_URL="$SHIM_URL"
@@ -183,9 +193,6 @@ jobs:
               ;;
             opencode)
               export OPENCODE_CONFIG="$RUNNER_TEMP/opencode.json"
-              cat > "$RUNNER_TEMP/opencode.json" <<JSON
-              { "provider": { "headroom": { "npm": "@ai-sdk/openai-compatible", "name": "Shim", "options": { "baseURL": "$SHIM_URL/v1", "apiKey": "sk-shim-fake" }, "models": { "${{ env.SCALEWAY_MODEL }}": {} } } } }
-              JSON
               export OPENCODE_MODEL="${{ env.SCALEWAY_MODEL }}"
               opencode run -m "${{ env.SCALEWAY_MODEL }}" "Reply with the single word OK" > "$RUNNER_TEMP/baseline/out.txt" 2>"$RUNNER_TEMP/baseline/err.txt" || true
               ;;
@@ -256,6 +263,18 @@ jobs:
       # ---------- 5. Headroom takes over the harness ----------
       - name: Point the harness at Headroom's intercept (what Headroom does)
         run: |
+          # Rewrite the OpenCode provider config to point at Headroom.
+          # (We write it with python BEFORE the case: a cat heredoc whose
+          # terminator sits inside a GitHub `case` block breaks the script, as
+          # seen in the first E2E run.)
+          python3 - "$RUNNER_TEMP/opencode.json" "${{ env.SCALEWAY_MODEL }}" <<'PY'
+          import json, sys
+          path, model = sys.argv[1], sys.argv[2]
+          json.dump({"provider": {"headroom": {"npm": "@ai-sdk/openai-compatible",
+              "name": "Headroom",
+              "options": {"baseURL": "http://127.0.0.1:6767/v1", "apiKey": "sk-headroom"},
+              "models": {model: {}}}}}, open(path, "w"), indent=2)
+          PY
           case "${{ matrix.harness }}" in
             claude_code)
               export ANTHROPIC_BASE_URL="http://127.0.0.1:6767"
@@ -267,9 +286,7 @@ jobs:
               ;;
             opencode)
               export OPENCODE_CONFIG="$RUNNER_TEMP/opencode.json"
-              cat > "$RUNNER_TEMP/opencode.json" <<JSON
-              { "provider": { "headroom": { "npm": "@ai-sdk/openai-compatible", "name": "Headroom", "options": { "baseURL": "http://127.0.0.1:6767/v1", "apiKey": "sk-headroom" }, "models": { "${{ env.SCALEWAY_MODEL }}": {} } } } }
-              JSON
+              export OPENCODE_MODEL="${{ env.SCALEWAY_MODEL }}"
               ;;
           esac
 
@@ -336,7 +353,18 @@ jobs:
           echo "--- tail headroom.log ---"
           tail -30 "$RUNNER_TEMP/headroom.log"
 
-      - name: Upload Headroom log (diagnostics)
+      - name: Capture E2E screenshot into ./screenshots
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p screenshots
+          if command -v import >/dev/null 2>&1; then
+            import -display :99 -window root "screenshots/e2e-${{ matrix.harness }}-headroom.png" \
+              && echo "Screenshot -> screenshots/e2e-${{ matrix.harness }}-headroom.png" || true
+          else
+            echo "no screenshot tool available — skipping capture"
+          fi
+
+      - name: Upload Headroom log + screenshots (diagnostics)
         uses: actions/upload-artifact@v4
         with:
           name: e2e-${{ matrix.harness }}-logs
@@ -344,4 +372,6 @@ jobs:
             ${{ runner.temp }}/headroom.log
             ${{ runner.temp }}/*.txt
             ${{ runner.temp }}/shim.log
+            screenshots/*
           if-no-files-found: ignore
+          retention-days: 30
