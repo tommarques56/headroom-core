@@ -12,11 +12,12 @@ name: E2E user-flow (harness + provider + Headroom)
 #      Scaleway only serves the OpenAI schema, so the shim is what a
 #      liteLLM / one-api gateway is in a real stack,
 #   3. verify the harness answers (baseline, no Headroom in the loop),
-#   4. install Headroom (release artifact) and let it take over,
-#   5. re-run the SAME prompts through Headroom and assert it still works,
-#      then read /stats to confirm tokens were saved.
-#
-# Screenshots are captured into ./screenshots and uploaded as artifacts.
+#   4. install the Headroom backend the same way the desktop app does
+#      (managed venv + pinned headroom-ai wheel + per-OS requirements lock)
+#      and start it as a HEADLESS proxy — no GUI, no WebKit, so it works
+#      identically on all three runners,
+#   5. re-run the SAME prompts through the Headroom proxy and assert it still
+#      works, then read /stats on the proxy to confirm tokens were saved.
 
 on:
   workflow_dispatch:
@@ -33,7 +34,11 @@ env:
   SCALEWAY_BASE_URL: https://api.scaleway.ai/v1
   SCALEWAY_MODEL: deepseek-v4.1-flash-1017
   SHIM_PORT: "4010"
+  # Headroom proxy port. The headless proxy speaks Anthropic on this port and
+  # /stats + /readyz live here too. (The desktop app's GUI/tray build listens
+  # on the same port; nothing GUI is started in these tests.)
   HEADROOM_PORT: "6767"
+  HEADROOM_URL: "http://127.0.0.1:6767"
 
 jobs:
   e2e:
@@ -68,23 +73,19 @@ jobs:
 
     env:
       HEADROOM_DATA_DIR: ${{ matrix.runOs == 'windows' && 'C:\\headroom-data' || '/tmp/headroom-data' }}
-      HEADROOM_ACCOUNT_API_BASE_URL: http://127.0.0.1:8090/api/v1
       SHIM_URL: "http://127.0.0.1:4010"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- 0. resolve the Headroom release tag ----------
-      - name: Resolve release tag
-        id: tag
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # ---------- 0. resolve the Headroom runtime pin ----------
+      - name: Resolve Headroom runtime pin
+        id: pin
         run: |
-          tag="${{ inputs.release_tag }}"
-          if [ -z "$tag" ]; then tag="$(gh api repos/tommarques56/headroom-core/releases/latest --jq .tag_name)"; fi
-          echo "tag=$tag"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          pin="$(sed -n 's/^pub(crate) const HEADROOM_PINNED_VERSION: &str = "\(.*\)";/\1/p' src-tauri/src/tool_manager.rs)"
+          echo "pin=$pin"
+          echo "pin=$pin" >> "$GITHUB_OUTPUT"
         shell: bash
 
       # ---------- 1. install the harness(es) for this scenario ----------
@@ -143,7 +144,7 @@ jobs:
                 opencode --version || true
                 ;;
               hermes)
-              if [ -n "${LOCALAPPDATA:-}" ]; then export PATH="$LOCALAPPDATA/hermes/bin:$PATH"; fi
+              if [ "${{ matrix.runOs }}" = "windows" ]; then export PATH="$HOME/AppData/Local/hermes/bin:$PATH"; fi
                 hermes --version || hermes -V || true
                 ;;
               pi)          pi --version || true ;;
@@ -155,6 +156,12 @@ jobs:
             verify_one "${{ matrix.scenario }}"
           fi
         shell: bash
+
+      # ---------- 1.5. set up Python 3.12 (used by setup scripts + proxy) ----------
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       # ---------- 2. the provider shim (Anthropic<->OpenAI -> Scaleway) ----------
       - name: Start the provider shim toward Scaleway
@@ -196,7 +203,7 @@ jobs:
 
           export PATH="$HOME/.opencode/bin:$PATH"
           export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
-          if [ -n "${LOCALAPPDATA:-}" ]; then export PATH="$LOCALAPPDATA/hermes/bin:$PATH"; fi
+          if [ "${{ matrix.runOs }}" = "windows" ]; then export PATH="$HOME/AppData/Local/hermes/bin:$PATH"; fi
 
           # --- per-harness config helper: returns a run command ---
           setup_claude() {
@@ -243,7 +250,7 @@ jobs:
           }
           setup_hermes() {
             if [ "${{ matrix.runOs }}" = "windows" ]; then
-              HERMES_HOME="$LOCALAPPDATA/hermes"
+              HERMES_HOME="$HOME/AppData/Local/hermes"
             else
               HERMES_HOME="$HOME/.hermes"
             fi
@@ -329,154 +336,94 @@ jobs:
           fi
         shell: bash
 
-      # ---------- 4. install Headroom (the user's release artifact, per OS) ----------
-      - name: Install Linux system dependencies (WebKitGTK/EGL)
-        if: matrix.runOs == 'linux'
+      # ---------- 4. install the Headroom headless backend ----------
+      # The desktop app installs a managed Python runtime (venv) from:
+      #   - src-tauri/python/headroom-{os}-requirements.lock  (pinned deps)
+      #   - the pinned headroom-ai wheel (HEADROOM_PINNED_VERSION)
+      # We do exactly that here, on bare Python, so the proxy under test is
+      # byte-identical to the engine the shipped app would run — but without
+      # the Tauri GUI, so no WebKit/EGL/tray matters on any of the 3 OSes.
+      - name: Install the Headroom backend (managed venv, per-OS lock + pinned wheel)
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            libwebkit2gtk-4.1-0 libgtk-3-0 libegl1 libgles2 libgbm1 \
-            libxdo3 xvfb libxss1 libxtst6 libasound2t64 libayatana-appindicator3-1
-          echo "linux deps installed"
-
-      - name: Install Headroom (release artifact, per OS)
-        id: install
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${{ steps.tag.outputs.tag }}"
-          mkdir -p "$RUNNER_TEMP/installer"
-          case "${{ matrix.runOs }}" in
-            linux)
-              url="$(gh api "repos/tommarques56/headroom-core/releases/tags/${tag}" --jq '.assets[] | select(.name | endswith(".AppImage")) | .browser_download_url')"
-              curl -fsSL -o "$RUNNER_TEMP/installer/headroom.AppImage" "$url"
-              chmod +x "$RUNNER_TEMP/installer/headroom.AppImage"
-              (cd "$RUNNER_TEMP/installer" && ./headroom.AppImage --appimage-extract > /dev/null 2>&1)
-              bin="$(find "$RUNNER_TEMP/installer/squashfs-root" -type f -name 'headroom-desktop' -perm -u+x | head -1)"
-              [ -n "$bin" ] || bin="$(find "$RUNNER_TEMP/installer/squashfs-root" -type f -perm -u+x | grep -i headroom | head -1)"
-              echo "bin=$bin"
-              echo "bin=$bin" >> "$GITHUB_OUTPUT"
-              ;;
-            windows)
-              url="$(gh api "repos/tommarques56/headroom-core/releases/tags/${tag}" --jq '.assets[] | select(.name | endswith("-setup.exe")) | .browser_download_url')"
-              curl -fsSL -o "$RUNNER_TEMP/installer/headroom_setup.exe" "$url"
-              "$RUNNER_TEMP/installer/headroom_setup.exe" /S /currentuser || true
-              sleep 5
-              exe="$LOCALAPPDATA/Programs/Headroom/Headroom.exe"
-              if [ ! -f "$exe" ]; then exe="$(find "$LOCALAPPDATA/Programs" -iname 'headroom.exe' | head -1)"; fi
-              echo "bin=$exe"
-              echo "bin=$exe" >> "$GITHUB_OUTPUT"
-              ;;
-            macos)
-              url="$(gh api "repos/tommarques56/headroom-core/releases/tags/${tag}" --jq '.assets[] | select(.name | endswith(".dmg")) | .browser_download_url')"
-              curl -fsSL -o "$RUNNER_TEMP/installer/headroom.dmg" "$url"
-              hdiutil attach "$RUNNER_TEMP/installer/headroom.dmg" -nobrowse -quiet || true
-              app="$(ls -d /Volumes/Headroom*/Headroom.app 2>/dev/null | head -1)"
-              mkdir -p "$HOME/Applications"
-              cp -R "$app" "$HOME/Applications/" 2>/dev/null || cp -R "$app" "$HOME/Applications/" || true
-              bin="$HOME/Applications/Headroom.app/Contents/MacOS/headroom-desktop"
-              [ -x "$bin" ] || bin="$(find "$HOME/Applications/Headroom.app" -type f -perm -u+x -name '*headroom*' | head -1)"
-              echo "bin=$bin"
-              echo "bin=$bin" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
-          echo "installed binary: $bin"
-        shell: bash
-
-      # ---------- 5. pre-configure Headroom -> shim upstream, boot, wire ----------
-      - name: Pre-write Headroom upstream → the shim
-        run: |
-          cfg="$HEADROOM_DATA_DIR/config"
-          mkdir -p "$cfg"
-          python3 - "$cfg" <<'PY'
-          import json, os, sys
-          cfg = sys.argv[1]
-          path = os.path.join(cfg, "launch-profile.json")
-          try:
-              doc = json.load(open(path))
-          except FileNotFoundError:
-              doc = {}
-          doc["upstream_override"] = {
-              "mode": "override",
-              "base_url": f"http://127.0.0.1:{os.environ['SHIM_PORT']}",
-              "has_token": False,
-              "provider": "",
-              "model": os.environ.get("SCALEWAY_MODEL", ""),
-              "small_model": "",
-              "context_window": "",
-              "replaced_env": {},
-          }
-          doc.setdefault("accepted_terms_version", 1)
-          doc.setdefault("setup_wizard_complete", True)
-          doc.setdefault("launch_count", 1)
-          json.dump(doc, open(path, "w"), indent=2)
-          print("wrote", path)
-          PY
-        shell: bash
-
-      - name: Boot Headroom (backend self-installs its runtime)
-        run: |
-          if [ "${{ matrix.runOs }}" = "linux" ]; then
-            Xvfb :99 -screen 0 1280x800x24 &
-            export DISPLAY=:99
-            export WEBKIT_DISABLE_DMABUF_RENDERER=1
-            # Run from the extracted AppImage root so WebKit finds its
-            # sub-processes via './lib/.../WebKitNetworkProcess' relative paths.
-            hroot="$(dirname "$(dirname "${{ steps.install.outputs.bin }}")")"
-            [ -e "$hroot/AppRun" ] || hroot="$(dirname "${{ steps.install.outputs.bin }}")"
-            cd "$hroot"
-            echo "HRROOT=$hroot CWD=$(pwd)"
-            bin_sub="$(basename "${{ steps.install.outputs.bin }}")"
-            if [ -e "$hroot/$bin_sub" ]; then export HRBIN="./$bin_sub"; fi
-          fi
-          if [ "${{ matrix.runOs }}" = "macos" ]; then
-            # GH macOS runners set com.apple.quarantine on downloaded apps -> Gatekeeper
-            # blocks the unsigned-for-CI binary and it dies without writing a log.
-            appdir="$(dirname "$(dirname "$(dirname "${{ steps.install.outputs.bin }}")")")"
-            xattr -cr "$appdir" 2>/dev/null || true
-            codesign --force --deep --sign - "$appdir" 2>/dev/null || true
-            # diagnostics to pinpoint silent death (arch / signature)
-            file "${{ steps.install.outputs.bin }}" || true
-            lipo -info "${{ steps.install.outputs.bin }}" 2>&1 || true
-            codesign -dv "$appdir" 2>&1 | head -3 || true
-          fi
-          if [ "${{ matrix.runOs }}" = "linux" ] && [ -n "${HRBIN:-}" ]; then
-            $HRBIN > "$RUNNER_TEMP/headroom.log" 2>&1 &
+          pin="${{ steps.pin.outputs.pin }}"
+          test -n "$pin"
+          mkdir -p "$HEADROOM_DATA_DIR/headroom/runtime"
+          if [ "${{ matrix.runOs }}" = "windows" ]; then
+            py="python"
+            "$py" -m venv "$HEADROOM_DATA_DIR/headroom/runtime/venv"
+            py="$HEADROOM_DATA_DIR/headroom/runtime/venv/Scripts/python.exe"
           else
-            "${{ steps.install.outputs.bin }}" > "$RUNNER_TEMP/headroom.log" 2>&1 &
+            py="$HEADROOM_DATA_DIR/headroom/runtime/venv/bin/python"
+            python3 -m venv "$HEADROOM_DATA_DIR/headroom/runtime/venv"
           fi
+          case "${{ matrix.runOs }}" in
+            linux)   lock=src-tauri/python/headroom-linux-requirements.lock ;;
+            windows) lock=src-tauri/python/headroom-windows-requirements.lock ;;
+            *)       lock=src-tauri/python/headroom-requirements.lock ;;
+          esac
+          "$py" -m pip install --quiet --only-binary=:all: \
+            --find-links https://github.com/gglucass/headroom-desktop/releases/expanded_assets/vendor-wheels-v1 \
+            -r "$lock"
+          "$py" -m pip install --quiet --no-deps --only-binary=:all: "headroom-ai==$pin"
+          "$py" -c "import headroom, sys; print('headroom', headroom.__version__ if hasattr(headroom,'__version__') else 'ok', 'on', sys.platform)"
+          echo "backend installed"
+        shell: bash
+
+      # ---------- 5. boot the Headroom proxy (headless) toward the shim ----------
+      - name: Start Headroom proxy → the shim
+        run: |
+          set -euo pipefail
+          # Isolated HOME so the headless proxy never touches a real user's
+          # ~/.headroom (stats, CCR store, compression cache) — the CI proxy
+          # writes to $RUNNER_TEMP/hr-home/.headroom instead.
+          HEADLESS_HOME="$RUNNER_TEMP/hr-home"
+          mkdir -p "$HEADLESS_HOME"
+          if [ "${{ matrix.runOs }}" = "windows" ]; then
+            hr="$HEADROOM_DATA_DIR/headroom/runtime/venv/Scripts/headroom.exe"
+          else
+            hr="$HEADROOM_DATA_DIR/headroom/runtime/venv/bin/headroom"
+          fi
+          echo "HRBIN=$hr"
+          # Isolate everything the wheel writes under a CI-only HOME so the
+          # proxy can never read or clobber real user state. HEADROOM_HARD_
+          # WATCHDOG_SECS=0: the wheel's hard watchdog dumps threads and exits
+          # when the interpreter has no work for 90s — on an idle job that
+          # killed the proxy mid-test with a bare exit and no log, so disable
+          # it here.
+          HOME="$HEADLESS_HOME" ANTHROPIC_TARGET_API_URL="$SHIM_URL" OPENAI_TARGET_API_URL="$SHIM_URL" \
+            HEADROOM_LOSSLESS=1 \
+            HEADROOM_HARD_WATCHDOG_SECS=0 \
+            "$hr" proxy --port "$HEADROOM_PORT" --mode token --no-http2 --no-rate-limit \
+            > "$RUNNER_TEMP/headroom.log" 2>&1 &
           echo "HR_PID=$!"
+          HR_PID=$!
+          echo "HR_PID=$HR_PID" >> "$GITHUB_ENV"
+          # rapid liveness: dies-nearly-immediately check
           sleep 3
           if ! kill -0 "$HR_PID" 2>/dev/null; then
-            echo "::warning::Headroom died immediately after launch"
-            cat "$RUNNER_TEMP/headroom.log" 2>/dev/null || true
+            echo "::error::Headroom proxy died immediately after launch"
+            tail -60 "$RUNNER_TEMP/headroom.log"
+            exit 1
           fi
+          echo "Headroom proxy process alive on :$HEADROOM_PORT"
         shell: bash
 
-      - name: Wait for Headroom backend /readyz (and point harnesses at 6767)
+      - name: Wait for Headroom proxy /readyz (point harnesses at 6767)
         run: |
-          if [ "${{ matrix.runOs }}" = "windows" ]; then
-            echo "ANTHROPIC_BASE_URL=http://127.0.0.1:6767" >> "$GITHUB_ENV"
-            echo "OPENAI_BASE_URL=http://127.0.0.1:6767/v1" >> "$GITHUB_ENV"
-          else
-            export ANTHROPIC_BASE_URL="http://127.0.0.1:6767"
-            export OPENAI_BASE_URL="http://127.0.0.1:6767/v1"
-          fi
-          deadline=$(( $(date +%s) + 1500 ))
+          deadline=$(( $(date +%s) + 240 ))
           ok=0
           while [ "$(date +%s)" -lt "$deadline" ]; do
-            if curl -fsS http://127.0.0.1:6768/readyz >/dev/null 2>&1; then ok=1; break; fi
+            if curl -fsS "http://127.0.0.1:${HEADROOM_PORT}/readyz" >/dev/null 2>&1; then ok=1; break; fi
             if ! kill -0 "$HR_PID" 2>/dev/null; then
-              echo "::error::Headroom process died during first boot"
+              echo "::error::Headroom proxy died during boot"
               tail -80 "$RUNNER_TEMP/headroom.log"; exit 1
             fi
-            sleep 10
+            sleep 5
           done
-          [ "$ok" = "1" ] || { echo "::error::Headroom backend never became ready"; tail -80 "$RUNNER_TEMP/headroom.log"; exit 1; }
-          echo "Headroom backend ready."
-          curl -fsS http://127.0.0.1:6768/readyz; echo
+          [ "$ok" = "1" ] || { echo "::error::Headroom proxy never became ready on :$HEADROOM_PORT"; tail -80 "$RUNNER_TEMP/headroom.log"; exit 1; }
+          echo "Headroom proxy ready."
+          curl -fsS "http://127.0.0.1:${HEADROOM_PORT}/readyz"; echo
         shell: bash
 
       # ---------- 6. re-run the same prompts through Headroom ----------
@@ -491,9 +438,11 @@ jobs:
           )
           export PATH="$HOME/.opencode/bin:$PATH"
           export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
-          if [ -n "${LOCALAPPDATA:-}" ]; then export PATH="$LOCALAPPDATA/hermes/bin:$PATH"; fi
-          export ANTHROPIC_BASE_URL="http://127.0.0.1:6767"
-          export OPENAI_BASE_URL="http://127.0.0.1:6767/v1"
+          if [ "${{ matrix.runOs }}" = "windows" ]; then export PATH="$HOME/AppData/Local/hermes/bin:$PATH"; fi
+          export ANTHROPIC_BASE_URL="${{ env.HEADROOM_URL }}"
+          export OPENAI_BASE_URL="${{ env.HEADROOM_URL }}/v1"
+          export HEADROOM_URL="${{ env.HEADROOM_URL }}"
+          export ANTHROPIC_API_KEY="sk-headroom"
 
           # Write harness configs ONCE (flush-left terminators at YAML base
           # indent -> bash sees them at column 0; inside a `case` the YAML
@@ -507,20 +456,20 @@ jobs:
 
           [model_providers.e2e]
           name = "E2E via Headroom"
-          base_url = "http://127.0.0.1:6767/v1"
+          base_url = "${{ env.HEADROOM_URL }}/v1"
           env_key = "OPENAI_API_KEY"
           CFG
 
           cat > "$RUNNER_TEMP/opencode.json" <<'PY'
           {"provider": {"e2e": {"name": "E2E via Headroom", "npm": "@ai-sdk/openai-compatible",
             "env": ["E2E_API_KEY"],
-            "options": {"baseURL": "http://127.0.0.1:6767/v1", "apiKey": "{env:E2E_API_KEY}"},
+            "options": {"baseURL": "${{ env.HEADROOM_URL }}/v1", "apiKey": "{env:E2E_API_KEY}"},
             "models": {"${{ env.SCALEWAY_MODEL }}": {}}}}}
           PY
           export E2E_API_KEY="sk-headroom"
 
           if [ "${{ matrix.runOs }}" = "windows" ]; then
-            export HERMES_HOME="$LOCALAPPDATA/hermes"
+            export HERMES_HOME="$HOME/AppData/Local/hermes"
           else
             export HERMES_HOME="$HOME/.hermes"
           fi
@@ -529,7 +478,7 @@ jobs:
           model:
             provider: "anthropic"
             default: "${{ env.SCALEWAY_MODEL }}"
-            base_url: "http://127.0.0.1:6767"
+            base_url: "${{ env.HEADROOM_URL }}"
             api_key: "sk-headroom"
           approvals:
             mode: "off"
@@ -539,19 +488,19 @@ jobs:
 
           mkdir -p "$HOME/.pi/agent"
           cat > "$HOME/.pi/agent/models.json" <<PY
-          {"providers": {"anthropic": {"baseUrl": "http://127.0.0.1:6767", "apiKey": "sk-headroom"}}}
+          {"providers": {"anthropic": {"baseUrl": "${{ env.HEADROOM_URL }}", "apiKey": "sk-headroom"}}}
           PY
 
           tap() {
             local h="$1" n="$2" prompt="$3"
             case "$h" in
               claude_code)
-                ANTHROPIC_BASE_URL=http://127.0.0.1:6767 ANTHROPIC_API_KEY=sk-headroom \
+                ANTHROPIC_BASE_URL="${{ env.HEADROOM_URL }}" ANTHROPIC_API_KEY=sk-headroom \
                 claude -p --model "${{ env.SCALEWAY_MODEL }}" --dangerously-skip-permissions "$prompt" \
                   > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
                 ;;
               codex)
-                OPENAI_BASE_URL=http://127.0.0.1:6767/v1 OPENAI_API_KEY=sk-headroom \
+                OPENAI_BASE_URL="${{ env.HEADROOM_URL }}/v1" OPENAI_API_KEY=sk-headroom \
                 codex exec --skip-git-repo-check "$prompt" \
                   > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
                 ;;
@@ -588,33 +537,22 @@ jobs:
           echo "All prompts answered through Headroom."
         shell: bash
 
-      # ---------- 7. token savings + screenshots ----------
+      # ---------- 7. token savings + diagnostics ----------
       - name: Read Headroom /stats (token savings evidence)
         run: |
           sleep 2
           echo "--- /stats ---"
-          curl -fsS http://127.0.0.1:6768/stats 2>/dev/null | head -c 2000 || echo "(stats not readable)"
+          curl -fsS "http://127.0.0.1:${HEADROOM_PORT}/stats" 2>/dev/null | head -c 2000 || echo "(stats not readable)"
           echo
+          echo "--- compression summary ---"
+          curl -fsS "http://127.0.0.1:${HEADROOM_PORT}/stats" 2>/dev/null \
+            | python -c "import json,sys; d=json.load(sys.stdin)['summary']; c=d['compression']; print(json.dumps({'mode': d['mode'], 'requests_compressed': c['requests_compressed'], 'total_tokens_before': c['total_tokens_before'], 'total_tokens_removed': c['total_tokens_removed'], 'avg_compression_pct': c['avg_compression_pct']}, indent=2))" \
+            || echo "(could not parse /stats)"
           echo "--- tail headroom.log ---"
           (tail -30 "$RUNNER_TEMP/headroom.log" || true)
         shell: bash
 
-      - name: Capture E2E screenshot into ./screenshots
-        if: ${{ !cancelled() }}
-        run: |
-          mkdir -p screenshots
-          if [ "${{ matrix.runOs }}" = "linux" ] && command -v import >/dev/null 2>&1; then
-            import -display :99 -window root "screenshots/e2e-${{ matrix.scenario }}-headroom.png" \
-              && echo "Screenshot -> screenshots/e2e-${{ matrix.scenario }}-headroom.png" || true
-          elif [ "${{ matrix.runOs }}" = "macos" ] && command -v screencapture >/dev/null 2>&1; then
-            screencapture -x "screenshots/e2e-${{ matrix.scenario }}-headroom.png" \
-              && echo "Screenshot -> screenshots/e2e-${{ matrix.scenario }}-headroom.png" || true
-          else
-            echo "no screenshot tool available on this runner — skipping capture"
-          fi
-        shell: bash
-
-      - name: Upload Headroom log + screenshots (diagnostics)
+      - name: Upload Headroom log + shim log + responses (diagnostics)
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -624,6 +562,5 @@ jobs:
             ${{ runner.temp }}/shim.log
             ${{ runner.temp }}/*.txt
             ${{ runner.temp }}/baseline/*.txt
-            screenshots/*
           if-no-files-found: ignore
           retention-days: 30
