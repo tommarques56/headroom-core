@@ -101,12 +101,35 @@ jobs:
           PYEOF
           ls -la release-assets/
 
+      - name: Delete existing macOS assets from the release
+        # Makes re-dispatches idempotent: remove any prior Headroom_*mac /
+        # Headroom.app.tar.gz / latest.json artifacts before uploading again.
+        # gh release delete-asset needs a tag, so this only runs when the
+        # release tag exists (created by the cross-platform job or a tag push).
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          for name in "Headroom_${version}_mac.dmg" "Headroom.app.tar.gz" "Headroom.app.tar.gz.sig" "latest.json"; do
+            gh release delete-asset "$tag" "$name" --yes 2>/dev/null || true
+          done
+
       - name: Upload release artifacts
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*
-          generate_release_notes: true
-          prerelease: false
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          # Workflow_dispatch has no git tag: upload straight to the existing
+          # v{VERSION} release (created on the first tag release) instead of
+          # softprops/action-gh-release, which aborts without a tag.
+          gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY" || {
+            echo "Release $tag not found; creating it now." >&2
+            gh release create "$tag" release-assets/* --title "$tag" --notes "Headroom core build ${version}" --repo "$GITHUB_REPOSITORY"
+          }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
