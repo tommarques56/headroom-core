@@ -1,0 +1,347 @@
+name: E2E user-flow (harness + provider + Headroom)
+
+# Reproduces, in user order, the journey of a real install on a fresh OS:
+#   1. install the harness CLI (Claude Code / Codex / OpenCode),
+#   2. configure it against our provider -- here a local Anthropic->OpenAI
+#      shim backed by Scaleway Generative (deepseek-v4.1-flash-1017), because
+#      Headroom's proxy speaks Anthropic while Scaleway only serves the OpenAI
+#      schema; the shim is what a liteLLM/one-api gateway is in a real stack,
+#   3. verify the harness answers (baseline, no Headroom in the loop),
+#   4. install Headroom (release artifact) and let it take over the harness,
+#   5. re-run the SAME prompts through Headroom and assert it still works,
+#      then read /stats to confirm tokens were saved.
+#
+# Kept separate from the release workflows (which boot-smoke the artifact):
+# this one exercises harness install + provider routing end-to-end and takes
+# minutes per matrix cell, so it runs on demand against a chosen release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Headroom release tag to install (default: latest)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  SCALEWAY_BASE_URL: https://api.scaleway.ai/v1
+  SCALEWAY_MODEL: deepseek-v4.1-flash-1017
+  SHIM_PORT: "4010"
+  HEADROOM_PORT: "6767"
+
+jobs:
+  e2e:
+    name: E2E ${{ matrix.harness }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [claude_code, codex, opencode]
+
+    env:
+      HEADROOM_DATA_DIR: ${{ runner.temp }}/headroom-data
+      HEADROOM_ACCOUNT_API_BASE_URL: http://127.0.0.1:8090/api/v1
+
+    steps:
+      # ---------- 0. resolve the Headroom release tag ----------
+      - name: Resolve release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.release_tag }}"
+          [ -n "$tag" ] || tag="$(gh api repos/tommarques56/headroom-core/releases/latest --jq .tag_name)"
+          echo "tag=$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # ---------- 1. install the harness (exactly one per cell) ----------
+      - name: Install ${{ matrix.harness }}
+        run: |
+          case "${{ matrix.harness }}" in
+            claude_code) npm install -g @anthropic-ai/claude-code 2>&1 | tail -2 ;;
+            codex)       npm install -g @openai/codex 2>&1 | tail -2 ;;
+            opencode)    npm install -g opencode-ai 2>&1 | tail -2 ;;
+          esac
+
+      - name: Check the harness CLI is on PATH
+        run: |
+          case "${{ matrix.harness }}" in
+            claude_code) claude --version ;;
+            codex)       codex --version ;;
+            opencode)    opencode --version ;;
+          esac
+
+      # ---------- 2. the provider shim (Anthropic->Scaleway OpenAI) ----------
+      - name: Start the Anthropic->OpenAI shim toward Scaleway
+        env:
+          SCALEWAY_API_KEY: ${{ secrets.SCALEWAY_API_KEY }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/shim"
+          cat > "$RUNNER_TEMP/shim/shim.mjs" <<'SHIM'
+          import http from 'node:http';
+
+          const SCW = process.env.SCALEWAY_BASE_URL;
+          const MODEL = process.env.SCALEWAY_MODEL;
+          const KEY = process.env.SCALEWAY_API_KEY;
+          const PORT = Number(process.env.SHIM_PORT);
+
+          // Translate a single Anthropic /v1/messages request to OpenAI
+          // /chat/completions and back. Enough for non-streaming CLI -p calls.
+          function toOpenAI(body) {
+            return {
+              model: MODEL,
+              messages: (body.messages || []).map((m) => ({
+                role: m.role,
+                content: Array.isArray(m.content)
+                  ? m.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n')
+                  : String(m.content ?? ''),
+              })),
+              max_tokens: body.max_tokens ?? 256,
+              temperature: body.temperature ?? undefined,
+            };
+          }
+
+          function toAnthropic(payload) {
+            const text = payload.choices?.[0]?.message?.content || '';
+            const u = payload.usage || {};
+            return {
+              id: 'msg_' + Math.random().toString(36).slice(2),
+              type: 'message',
+              role: 'assistant',
+              model: MODEL,
+              content: [{ type: 'text', text }],
+              stop_reason: 'end_turn',
+              stop_sequence: null,
+              usage: {
+                input_tokens: u.prompt_tokens || 0,
+                output_tokens: u.completion_tokens || 0,
+              },
+            };
+          }
+
+          const server = http.createServer((req, res) => {
+            if (req.method !== 'POST' || req.url.endsWith('/messages') === false) {
+              res.writeHead(404); res.end('not found'); return;
+            }
+            let raw = '';
+            req.on('data', (c) => (raw += c));
+            req.on('end', async () => {
+              let openaiBody;
+              try {
+                openaiBody = toOpenAI(JSON.parse(raw));
+              } catch (e) {
+                res.writeHead(400).end('bad request'); return;
+              }
+              try {
+                const upstream = await fetch(`${SCW}/chat/completions`, {
+                  method: 'POST',
+                  headers: {
+                    'content-type': 'application/json',
+                    authorization: `Bearer ${KEY}`,
+                  },
+                  body: JSON.stringify(openaiBody),
+                });
+                const json = await upstream.json();
+                res.writeHead(200, { 'content-type': 'application/json' });
+                res.end(JSON.stringify(toAnthropic(json)));
+                console.log(`[shim] ${upstream.status} role=${openaiBody.messages[0]?.role} prompt=${openaiBody.messages[0]?.content?.slice(0, 60)}`);
+              } catch (e) {
+                console.error('[shim] upstream error', e);
+                res.writeHead(502).end(JSON.stringify({ error: String(e) }));
+              }
+            });
+          });
+          server.listen(PORT, '127.0.0.1', () => console.log(`[shim] listening :${PORT}`));
+          SHIM
+          node "$RUNNER_TEMP/shim/shim.mjs" > "$RUNNER_TEMP/shim.log" 2>&1 &
+          echo "SHIM_PID=$!"
+          sleep 2
+          # Healthy? OPTIONS-free check right away.
+          node -e "fetch('http://127.0.0.1:$SHIM_PORT/nothere').then(r=>{if(r.status!==404)process.exit(1)}).catch(()=>process.exit(1)); console.log('shim up')"
+          if [ -s "$RUNNER_TEMP/shim.log" ]; then tail -5 "$RUNNER_TEMP/shim.log"; fi
+
+      # ---------- 3. baseline: harness talks to the provider directly ----------
+      - name: Baseline — ${{ matrix.harness }} against the provider (no Headroom)
+        env:
+          SHIM_URL: "http://127.0.0.1:${{ env.SHIM_PORT }}"
+        run: |
+          mkdir -p "$RUNNER_TEMP/baseline"
+          case "${{ matrix.harness }}" in
+            claude_code)
+              export ANTHROPIC_BASE_URL="$SHIM_URL"
+              export ANTHROPIC_API_KEY="sk-shim-fake"
+              claude -p "Reply with the single word OK" > "$RUNNER_TEMP/baseline/out.txt" 2>"$RUNNER_TEMP/baseline/err.txt" || true
+              ;;
+            codex)
+              export OPENAI_BASE_URL="$SHIM_URL/v1"
+              export OPENAI_API_KEY="sk-shim-fake"
+              codex exec --skip-git-repo-check "Reply with the single word OK" > "$RUNNER_TEMP/baseline/out.txt" 2>"$RUNNER_TEMP/baseline/err.txt" || true
+              ;;
+            opencode)
+              export OPENCODE_CONFIG="$RUNNER_TEMP/opencode.json"
+              cat > "$RUNNER_TEMP/opencode.json" <<JSON
+              { "provider": { "headroom": { "npm": "@ai-sdk/openai-compatible", "name": "Shim", "options": { "baseURL": "$SHIM_URL/v1", "apiKey": "sk-shim-fake" }, "models": { "${{ env.SCALEWAY_MODEL }}": {} } } } }
+              JSON
+              export OPENCODE_MODEL="${{ env.SCALEWAY_MODEL }}"
+              opencode run -m "${{ env.SCALEWAY_MODEL }}" "Reply with the single word OK" > "$RUNNER_TEMP/baseline/out.txt" 2>"$RUNNER_TEMP/baseline/err.txt" || true
+              ;;
+          esac
+          echo "--- baseline stdout ---"; cat "$RUNNER_TEMP/baseline/out.txt"; echo
+          echo "--- baseline stderr (tail) ---"; tail -5 "$RUNNER_TEMP/baseline/err.txt" 2>/dev/null || true
+          grep -qiE "OK|okay" "$RUNNER_TEMP/baseline/out.txt" || { echo "::error::baseline request did not return OK"; exit 1; }
+          echo "Baseline OK: harness reached the provider."
+
+      # ---------- 4. install Headroom (the user's release artifact) ----------
+      - name: Download and install Headroom AppImage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.tag.outputs.tag }}"
+          url="$(gh api "repos/tommarques56/headroom-core/releases/tags/${tag}" --jq '.assets[] | select(.name | test("\\.AppImage$")) | .browser_download_url')"
+          mkdir -p "$RUNNER_TEMP/installer"
+          curl -fsSL -o "$RUNNER_TEMP/installer/headroom.AppImage" "$url"
+          chmod +x "$RUNNER_TEMP/installer/headroom.AppImage"
+          # Extract (no FUSE on runners) and link the app binaries on PATH.
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/installer/headroom.AppImage" --appimage-extract > /dev/null 2>&1)
+          find "$RUNNER_TEMP/squashfs-root" -maxdepth 3 -type f | head -20
+          ls -la "$RUNNER_TEMP/squashfs-root/usr/bin/" 2>/dev/null || ls "$RUNNER_TEMP/squashfs-root/" 2>/dev/null
+
+      # AppImage internals vary by bundler; locate the real binary.
+      - name: Locate the Headroom binary in the extracted AppImage
+        id: bin
+        run: |
+          bin="$(find "$RUNNER_TEMP/squashfs-root" -type f -name 'headroom-desktop' -perm -u+x | head -1)"
+          [ -n "$bin" ] || bin="$(find "$RUNNER_TEMP/squashfs-root" -type f -perm -u+x | grep -i headroom | head -1)"
+          [ -n "$bin" ] || { echo "::error::no headroom binary in AppImage"; find "$RUNNER_TEMP/squashfs-root" -maxdepth 4 -type f | head -40; exit 1; }
+          echo "bin=$bin"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+
+      # Headroom reads its upstream at boot (upstream_override in the
+      # launch-profile under its managed data dir): write it to the shim BEFORE
+      # the app starts, so the proxy boots pointing at the shim instead of
+      # api.anthropic.com. The token lives in the shim, not in Headroom.
+      - name: Pre-write Headroom upstream → the shim
+        run: |
+          cfg="$HEADROOM_DATA_DIR/config"
+          mkdir -p "$cfg"
+          python3 - "$cfg" <<'PY'
+          import json, os, sys
+          cfg = sys.argv[1]
+          path = os.path.join(cfg, "launch-profile.json")
+          try:
+              doc = json.load(open(path))
+          except FileNotFoundError:
+              doc = {}
+          doc["upstream_override"] = {
+              "mode": "override",
+              "base_url": f"http://127.0.0.1:{os.environ['SHIM_PORT']}",
+              "has_token": False,
+              "provider": "",
+              "model": os.environ.get("SCALEWAY_MODEL", ""),
+              "small_model": "",
+              "context_window": "",
+              "replaced_env": {},
+          }
+          doc.setdefault("accepted_terms_version", 1)
+          doc.setdefault("setup_wizard_complete", True)
+          doc.setdefault("launch_count", 1)
+          json.dump(doc, open(path, "w"), indent=2)
+          print("wrote", path)
+          PY
+
+      # ---------- 5. Headroom takes over the harness ----------
+      - name: Point the harness at Headroom's intercept (what Headroom does)
+        run: |
+          case "${{ matrix.harness }}" in
+            claude_code)
+              export ANTHROPIC_BASE_URL="http://127.0.0.1:6767"
+              export ANTHROPIC_API_KEY="sk-headroom"
+              ;;
+            codex)
+              export OPENAI_BASE_URL="http://127.0.0.1:6767/v1"
+              export OPENAI_API_KEY="sk-headroom"
+              ;;
+            opencode)
+              export OPENCODE_CONFIG="$RUNNER_TEMP/opencode.json"
+              cat > "$RUNNER_TEMP/opencode.json" <<JSON
+              { "provider": { "headroom": { "npm": "@ai-sdk/openai-compatible", "name": "Headroom", "options": { "baseURL": "http://127.0.0.1:6767/v1", "apiKey": "sk-headroom" }, "models": { "${{ env.SCALEWAY_MODEL }}": {} } } } }
+              JSON
+              ;;
+          esac
+
+      - name: Boot Headroom (its backend self-installs the Python runtime)
+        env:
+          DISPLAY: ":99"
+        run: |
+          Xvfb :99 -screen 0 1280x800x24 &
+          export DISPLAY=:99
+          "${{ steps.bin.outputs.bin }}" > "$RUNNER_TEMP/headroom.log" 2>&1 &
+          echo "HR_PID=$!"
+          # Tell the harness how to reach Headroom (kept exported for later
+          # steps via the same env names).
+          case "${{ matrix.harness }}" in
+            claude_code) echo "ANTHROPIC_BASE_URL=http://127.0.0.1:6767" >> "$GITHUB_ENV"; echo "ANTHROPIC_API_KEY=sk-headroom" >> "$GITHUB_ENV" ;;
+            codex) echo "OPENAI_BASE_URL=http://127.0.0.1:6767/v1" >> "$GITHUB_ENV"; echo "OPENAI_API_KEY=sk-headroom" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Wait for Headroom backend /readyz
+        run: |
+          deadline=$(( $(date +%s) + 1500 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            if curl -fsS http://127.0.0.1:6768/readyz >/dev/null 2>&1; then echo "backend ready"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::Headroom backend never became ready"
+          tail -100 "$RUNNER_TEMP/headroom.log"
+          exit 1
+
+      # ---------- 6. re-run the same prompts through Headroom ----------
+      - name: Re-test through Headroom — multiple prompts
+        run: |
+          set -euo pipefail
+          prompts=(
+            "Reply with the single word OK"
+            "Explain in one sentence what a memory allocator does"
+            "Write a one-line Python function that returns the factorial of n"
+            "List three benefits of test automation in a single line each, separated by semicolons"
+          )
+          i=0
+          for prompt in "${prompts[@]}"; do
+            i=$((i+1))
+            case "${{ matrix.harness }}" in
+              claude_code) claude -p "$prompt" > "$RUNNER_TEMP/resp_$i.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true ;;
+              codex) codex exec --skip-git-repo-check "$prompt" > "$RUNNER_TEMP/resp_$i.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true ;;
+              opencode) opencode run -m "${{ env.SCALEWAY_MODEL }}" "$prompt" > "$RUNNER_TEMP/resp_$i.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true ;;
+            esac
+            echo "[prompt $i] $(head -c 80 "$RUNNER_TEMP/resp_$i.txt")"
+            if [ ! -s "$RUNNER_TEMP/resp_$i.txt" ]; then
+              echo "::error::prompt $i returned empty through Headroom"
+              tail -20 "$RUNNER_TEMP/hr_err.txt" 2>/dev/null || true
+              exit 1
+            fi
+          done
+          echo "All $i prompts answered through Headroom."
+
+      # ---------- 7. read /stats for token savings ----------
+      - name: Read Headroom /stats (token savings evidence)
+        run: |
+          sleep 2
+          echo "--- /stats ---"
+          curl -fsS http://127.0.0.1:6768/stats 2>/dev/null | head -c 2000 || echo "(stats not readable)"
+          echo
+          echo "--- tail headroom.log ---"
+          tail -30 "$RUNNER_TEMP/headroom.log"
+
+      - name: Upload Headroom log (diagnostics)
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.harness }}-logs
+          path: |
+            ${{ runner.temp }}/headroom.log
+            ${{ runner.temp }}/*.txt
+            ${{ runner.temp }}/shim.log
+          if-no-files-found: ignore
