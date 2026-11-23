@@ -99,12 +99,21 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           mkdir -p release-assets
-          dist="src-tauri/target/x86_64-pc-windows-msvc/debug/bundle/nsis"
+          # Windows `tauri build --debug` puts the bundle under
+          # target/debug/bundle (no target-triple segment). Locate it robustly:
+          base="src-tauri/target"
+          cand=""
+          for p in "$base/x86_64-pc-windows-msvc/debug/bundle" "$base/debug/bundle"; do
+            [ -d "$p/nsis" ] && cand="$p/nsis" && break
+          done
+          [ -n "$cand" ] || { echo "NSIS bundle dir not found" >&2; find src-tauri/target -maxdepth 4 -type d -name nsis 2>/dev/null; exit 1; }
+          echo "bundle dir: $cand"
+          dist="$cand"
           setup="$(ls "$dist"/*-setup.exe | head -1)"
           mv "$setup" "release-assets/Headroom_${version}_x64-setup.exe"
-          # Tauri updater (minisign) can sign the NSIS in dev too when the
+          # Tauri updater (minisign) signs the NSIS even in debug when the
           # private key is present; keep the .sig if produced.
-          for f in "$dist"/*.sig "$dist"/*.nsis.zip "$dist"/*.exe.sig; do
+          for f in "$dist"/*.sig; do
             [ -f "$f" ] && cp "$f" release-assets/ 2>/dev/null || true
           done
           ls -la release-assets/
