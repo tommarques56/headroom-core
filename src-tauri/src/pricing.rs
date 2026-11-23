@@ -19,9 +19,12 @@ use crate::storage::{app_data_dir, config_file};
 const HEADROOM_ACCOUNT_KEYCHAIN_SERVICE: &str = "com.extraheadroom.headroom.account";
 const HEADROOM_ACCOUNT_SESSION_ACCOUNT: &str = "session-token";
 #[cfg(debug_assertions)]
-const DEFAULT_ACCOUNT_API_BASE_URL: &str = "http://127.0.0.1:3000/api/v1";
+const DEFAULT_ACCOUNT_API_BASE_URL: &str = "http://127.0.0.1:8090/api/v1";
 #[cfg(not(debug_assertions))]
-const DEFAULT_ACCOUNT_API_BASE_URL: &str = "https://extraheadroom.com/api/v1";
+// Core-compression fork: the account backend is the self-hosted Supabase
+// gateway (backend/docker-compose.yml). Change this before shipping a hosted
+// backend; debug builds still honor HEADROOM_ACCOUNT_API_BASE_URL.
+const DEFAULT_ACCOUNT_API_BASE_URL: &str = "http://127.0.0.1:8090/api/v1";
 const LOCAL_GRACE_PERIOD_HOURS: i64 = 72;
 const TIER_MISMATCH_GRACE_DAYS: i64 = 14;
 /// AppSumo free-year accounts (the $0 tier 1 for Plus members) are pushed to
@@ -5450,7 +5453,7 @@ mod tests {
         #[cfg(not(debug_assertions))]
         assert_eq!(
             DEFAULT_ACCOUNT_API_BASE_URL,
-            "https://extraheadroom.com/api/v1"
+            "http://127.0.0.1:8090/api/v1"
         );
     }
 
