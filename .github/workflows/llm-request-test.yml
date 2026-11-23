@@ -201,7 +201,7 @@ jobs:
           # --- per-harness config helper: returns a run command ---
           setup_claude() {
             # Trust this workspace so headless claude will answer.
-            python3 - "${{ runner.workspace }}" <<'PY'
+            python3 - "${{ github.workspace }}" <<'PY'
           import json, os, sys
           root = sys.argv[1].replace("\\", "/")
           p = os.path.expanduser("~/.claude.json")
@@ -234,8 +234,9 @@ jobs:
           setup_opencode() {
             export OPENCODE_CONFIG="$RUNNER_TEMP/opencode.json"
             cat > "$OPENCODE_CONFIG" <<'PY'
-          {"provider": {"e2e": {"name": "E2E shim", "package": "@opencode/ai/providers/openai-compatible",
-            "env": ["E2E_API_KEY"], "settings": {"baseURL": "${{ env.SHIM_URL }}/v1"},
+          {"provider": {"e2e": {"name": "E2E shim", "npm": "@ai-sdk/openai-compatible",
+            "env": ["E2E_API_KEY"],
+            "options": {"baseURL": "${{ env.SHIM_URL }}/v1", "apiKey": "{env:E2E_API_KEY}"},
             "models": {"${{ env.SCALEWAY_MODEL }}": {}}}}}
           PY
             export E2E_API_KEY="sk-shim-fake"
@@ -281,7 +282,7 @@ jobs:
                 ;;
               opencode)
                 setup_opencode
-                opencode run --archived -m "e2e/${{ env.SCALEWAY_MODEL }}" --format default \
+                opencode run -m "e2e/${{ env.SCALEWAY_MODEL }}" --format default \
                   "Reply with the single word OK" \
                   > "$base_dir/opencode_$i.txt" 2>> "$base_dir/err.txt" || true
                 ;;
@@ -318,6 +319,16 @@ jobs:
         shell: bash
 
       # ---------- 4. install Headroom (the user's release artifact, per OS) ----------
+      - name: Install Linux system dependencies (WebKitGTK/EGL)
+        if: matrix.runOs == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libwebkit2gtk-4.1-0 libgtk-3-0 libegl1 libgles2 libgbm1 \
+            libxdo3 xvfb libxss1 libxtst6 libasound2 libayatana-appindicator3-1
+          echo "linux deps installed"
+
       - name: Install Headroom (release artifact, per OS)
         id: install
         env:
@@ -400,6 +411,13 @@ jobs:
             Xvfb :99 -screen 0 1280x800x24 &
             export DISPLAY=:99
           fi
+          if [ "${{ matrix.runOs }}" = "macos" ]; then
+            # GH macOS runners set com.apple.quarantine on downloaded apps -> Gatekeeper
+            # blocks the unsigned-for-CI binary and it dies without writing a log.
+            appdir="$(dirname "$(dirname "$(dirname "${{ steps.install.outputs.bin }}")")")"
+            xattr -cr "$appdir" 2>/dev/null || true
+            codesign --force --deep --sign - "$appdir" 2>/dev/null || true
+          fi
           "${{ steps.install.outputs.bin }}" > "$RUNNER_TEMP/headroom.log" 2>&1 &
           echo "HR_PID=$!"
           sleep 2
@@ -462,8 +480,9 @@ jobs:
           CFG
 
           cat > "$RUNNER_TEMP/opencode.json" <<'PY'
-          {"provider": {"e2e": {"name": "E2E via Headroom", "package": "@opencode/ai/providers/openai-compatible",
-            "env": ["E2E_API_KEY"], "settings": {"baseURL": "http://127.0.0.1:6767/v1"},
+          {"provider": {"e2e": {"name": "E2E via Headroom", "npm": "@ai-sdk/openai-compatible",
+            "env": ["E2E_API_KEY"],
+            "options": {"baseURL": "http://127.0.0.1:6767/v1", "apiKey": "{env:E2E_API_KEY}"},
             "models": {"${{ env.SCALEWAY_MODEL }}": {}}}}}
           PY
           export E2E_API_KEY="sk-headroom"
@@ -506,7 +525,7 @@ jobs:
                 ;;
               opencode)
                 OPENCODE_CONFIG="$RUNNER_TEMP/opencode.json" \
-                opencode run --archived -m "e2e/${{ env.SCALEWAY_MODEL }}" --format default "$prompt" \
+                opencode run -m "e2e/${{ env.SCALEWAY_MODEL }}" --format default "$prompt" \
                   > "$RUNNER_TEMP/resp_${h}_${n}.txt" 2>> "$RUNNER_TEMP/hr_err.txt" || true
                 ;;
               hermes)
