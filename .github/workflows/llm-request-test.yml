@@ -62,7 +62,7 @@ jobs:
     env:
       HEADROOM_DATA_DIR: ${{ matrix.runOs == 'windows' && 'C:\\headroom-data' || '/tmp/headroom-data' }}
       HEADROOM_ACCOUNT_API_BASE_URL: http://127.0.0.1:8090/api/v1
-      SHIM_URL: "http://127.0.0.1:${{ env.SHIM_PORT }}"
+      SHIM_URL: "http://127.0.0.1:4010"
 
     steps:
       - name: Checkout
