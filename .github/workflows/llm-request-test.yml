@@ -273,10 +273,10 @@ jobs:
               claude_code)
                 setup_claude
                 set +e
-                claude -p --model "${{ env.SCALEWAY_MODEL }}" --dangerously-skip-permissions "Reply with the single word OK" > "$base_dir/claude_$i.txt" 2>&1
+                claude -p --model "${{ env.SCALEWAY_MODEL }}" --dangerously-skip-permissions "Reply with the single word OK" > "$base_dir/claude_code_$i.txt" 2>&1
                 rc=$?
                 set -e
-                echo "[claude exit=$rc $(wc -c < "$base_dir/claude_$i.txt" 2>/dev/null || echo 0)B]"
+                echo "[claude exit=$rc $(wc -c < "$base_dir/claude_code_$i.txt" 2>/dev/null || echo 0)B]"
                 ;;
               codex)
                 setup_codex
