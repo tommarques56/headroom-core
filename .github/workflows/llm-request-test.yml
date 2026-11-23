@@ -337,7 +337,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             libwebkit2gtk-4.1-0 libgtk-3-0 libegl1 libgles2 libgbm1 \
-            libxdo3 xvfb libxss1 libxtst6 libasound2 libayatana-appindicator3-1
+            libxdo3 xvfb libxss1 libxtst6 libasound2t64 libayatana-appindicator3-1
           echo "linux deps installed"
 
       - name: Install Headroom (release artifact, per OS)
@@ -428,10 +428,18 @@ jobs:
             appdir="$(dirname "$(dirname "$(dirname "${{ steps.install.outputs.bin }}")")")"
             xattr -cr "$appdir" 2>/dev/null || true
             codesign --force --deep --sign - "$appdir" 2>/dev/null || true
+            # diagnostics to pinpoint silent death (arch / signature)
+            file "${{ steps.install.outputs.bin }}" || true
+            lipo -info "${{ steps.install.outputs.bin }}" 2>&1 || true
+            codesign -dv "$appdir" 2>&1 | head -3 || true
           fi
           "${{ steps.install.outputs.bin }}" > "$RUNNER_TEMP/headroom.log" 2>&1 &
           echo "HR_PID=$!"
-          sleep 2
+          sleep 3
+          if ! kill -0 "$HR_PID" 2>/dev/null; then
+            echo "::warning::Headroom died immediately after launch"
+            cat "$RUNNER_TEMP/headroom.log" 2>/dev/null || true
+          fi
         shell: bash
 
       - name: Wait for Headroom backend /readyz (and point harnesses at 6767)
