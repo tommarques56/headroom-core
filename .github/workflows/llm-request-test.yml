@@ -272,32 +272,43 @@ jobs:
             case "$h" in
               claude_code)
                 setup_claude
-                claude -p --model "${{ env.SCALEWAY_MODEL }}" --dangerously-skip-permissions "Reply with the single word OK" \
-                  > "$base_dir/claude_$i.txt" 2>> "$base_dir/err.txt" || true
+                set +e
+                claude -p --model "${{ env.SCALEWAY_MODEL }}" --dangerously-skip-permissions "Reply with the single word OK" > "$base_dir/claude_$i.txt" 2>&1
+                rc=$?
+                set -e
+                echo "[claude exit=$rc $(wc -c < "$base_dir/claude_$i.txt" 2>/dev/null || echo 0)B]"
                 ;;
               codex)
                 setup_codex
-                codex exec --skip-git-repo-check "Reply with the single word OK" \
-                  > "$base_dir/codex_$i.txt" 2>> "$base_dir/err.txt" || true
+                set +e
+                codex exec --skip-git-repo-check "Reply with the single word OK" > "$base_dir/codex_$i.txt" 2>&1
+                rc=$?
+                set -e
+                echo "[codex exit=$rc $(wc -c < "$base_dir/codex_$i.txt" 2>/dev/null || echo 0)B]"
                 ;;
               opencode)
                 setup_opencode
-                opencode run -m "e2e/${{ env.SCALEWAY_MODEL }}" --format default \
-                  "Reply with the single word OK" \
-                  > "$base_dir/opencode_$i.txt" 2>> "$base_dir/err.txt" || true
+                set +e
+                opencode run -m "e2e/${{ env.SCALEWAY_MODEL }}" --format default "Reply with the single word OK" > "$base_dir/opencode_$i.txt" 2>&1
+                rc=$?
+                set -e
+                echo "[opencode exit=$rc $(wc -c < "$base_dir/opencode_$i.txt" 2>/dev/null || echo 0)B]"
                 ;;
               hermes)
                 setup_hermes
-                hermes -z "Reply with the single word OK" -m "${{ env.SCALEWAY_MODEL }}" \
-                  --yolo -t safe \
-                  > "$base_dir/hermes_$i.txt" 2>> "$base_dir/err.txt" || true
+                set +e
+                hermes -z "Reply with the single word OK" -m "${{ env.SCALEWAY_MODEL }}" --yolo -t safe > "$base_dir/hermes_$i.txt" 2>&1
+                rc=$?
+                set -e
+                echo "[hermes exit=$rc $(wc -c < "$base_dir/hermes_$i.txt" 2>/dev/null || echo 0)B]"
                 ;;
               pi)
                 setup_pi
-                pi --print --provider anthropic --model "${{ env.SCALEWAY_MODEL }}" \
-                  --api-key sk-shim-fake --no-session \
-                  "Reply with the single word OK" \
-                  > "$base_dir/pi_$i.txt" 2>> "$base_dir/err.txt" || true
+                set +e
+                pi --print --provider anthropic --model "${{ env.SCALEWAY_MODEL }}" --api-key sk-shim-fake --no-session "Reply with the single word OK" > "$base_dir/pi_$i.txt" 2>&1
+                rc=$?
+                set -e
+                echo "[pi exit=$rc $(wc -c < "$base_dir/pi_$i.txt" 2>/dev/null || echo 0)B]"
                 ;;
             esac
           }
@@ -591,6 +602,7 @@ jobs:
             ${{ runner.temp }}/headroom.log
             ${{ runner.temp }}/shim.log
             ${{ runner.temp }}/*.txt
+            ${{ runner.temp }}/baseline/*.txt
             screenshots/*
           if-no-files-found: ignore
           retention-days: 30
