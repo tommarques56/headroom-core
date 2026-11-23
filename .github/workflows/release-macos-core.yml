@@ -1,0 +1,118 @@
+name: Release macOS
+
+# Builds the macOS universal DMG for the core-compression fork and attaches it
+# to a GitHub release. Ad-hoc signed (no Apple Developer ID configured yet):
+# the DMG opens on the build machine's Gatekeeper with a right-click override,
+# or you add the APPLE_* secrets later for a signed+notarized build.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-macos:
+    name: macOS Universal DMG
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    env:
+      # Self-hosted account backend (Supabase gateway). Replace with the
+      # public URL of your deployment before distributing builds.
+      HEADROOM_ACCOUNT_API_BASE_URL: http://127.0.0.1:8090/api/v1
+      # Updater: signed against this fork's key; endpoints point at this
+      # repo's releases. TAURI_SIGNING_PRIVATE_KEY comes from repo secrets.
+      HEADROOM_UPDATER_PUBLIC_KEY: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxQTRDRDBBREE5NUJENEMKUldSTXZaWGFDczJrMGJFYjdNOEJMVWQ3MlhtdGVhbjJlTkFQRC9jcjlzOTREV245eWs4c1FnRnoK
+      HEADROOM_UPDATER_ENDPOINTS: '["https://github.com/tommarques56/headroom-core/releases/latest/download/latest.json"]'
+      HEADROOM_SENTRY_DSN: ""
+      VITE_SENTRY_DSN: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Frontend typecheck and tests
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --skip against_the_installed_wheel
+
+      - name: Build the universal app
+        run: npx tauri build --target universal-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+
+      - name: Prepare release assets
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          DIST="src-tauri/target/universal-apple-darwin/release/bundle"
+          mkdir -p release-assets
+          cp "${DIST}/dmg/"*.dmg "release-assets/Headroom_${VERSION}_mac.dmg" 2>/dev/null || true
+          cp "${DIST}/macos/"*.app.tar.gz "release-assets/" 2>/dev/null || true
+          cp "${DIST}/macos/"*.app.tar.gz.sig "release-assets/" 2>/dev/null || true
+          python3 - <<'PYEOF'
+          import json, glob, datetime, os
+          dist = "src-tauri/target/universal-apple-darwin/release/bundle"
+          targz = glob.glob(f"{dist}/macos/*.app.tar.gz")[0]
+          sig = open(targz + ".sig").read().strip()
+          version = json.load(open("package.json"))["version"]
+          tag = os.environ.get("GITHUB_REF_NAME") if os.environ.get("GITHUB_REF_TYPE") == "tag" else f"v{version}"
+          url = f"https://github.com/tommarques56/headroom-core/releases/download/{tag}/Headroom.app.tar.gz"
+          latest = {
+              "version": version,
+              "notes": f"Headroom core build {version}",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": {
+                  "darwin-aarch64": {"signature": sig, "url": url},
+                  "darwin-x86_64": {"signature": sig, "url": url},
+              },
+          }
+          with open("release-assets/latest.json", "w") as f:
+              json.dump(latest, f, indent=2)
+          print("latest.json written for", version, "->", url)
+          PYEOF
+          ls -la release-assets/
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload DMG as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: headroom-macos-dmg
+          path: release-assets/*.dmg
+          retention-days: 30
