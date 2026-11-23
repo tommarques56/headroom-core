@@ -143,7 +143,7 @@ jobs:
                 opencode --version || true
                 ;;
               hermes)
-                export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$LOCALAPPDATA/hermes/bin:$PATH"
+              if [ -n "${LOCALAPPDATA:-}" ]; then export PATH="$LOCALAPPDATA/hermes/bin:$PATH"; fi
                 hermes --version || hermes -V || true
                 ;;
               pi)          pi --version || true ;;
@@ -163,8 +163,20 @@ jobs:
         run: |
           node scripts/e2e-shim.mjs > "$RUNNER_TEMP/shim.log" 2>&1 &
           echo "SHIM_PID=$!"
-          sleep 2
-          node -e "fetch('http://127.0.0.1:$SHIM_PORT/v1/models').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1)).then(()=>console.log('shim up'))"
+          # Robust readiness: retry the models probe for up to ~20s.
+          ok=""
+          for i in $(seq 1 20); do
+            if node -e "fetch('http://127.0.0.1:$SHIM_PORT/v1/models').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1)).then(()=>process.exit(0))"; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::shim did not become ready on :$SHIM_PORT"
+            tail -20 "$RUNNER_TEMP/shim.log"
+            exit 1
+          fi
+          echo "shim up"
           tail -5 "$RUNNER_TEMP/shim.log"
         shell: bash
 
@@ -183,14 +195,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/baseline"
 
           export PATH="$HOME/.opencode/bin:$PATH"
-          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$LOCALAPPDATA/hermes/bin:$PATH"
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+          if [ -n "${LOCALAPPDATA:-}" ]; then export PATH="$LOCALAPPDATA/hermes/bin:$PATH"; fi
 
           # --- per-harness config helper: returns a run command ---
           setup_claude() {
             # Trust this workspace so headless claude will answer.
             python3 - "${{ runner.workspace }}" <<'PY'
           import json, os, sys
-          root = sys.argv[1]
+          root = sys.argv[1].replace("\\", "/")
           p = os.path.expanduser("~/.claude.json")
           try:
               d = json.load(open(p))
@@ -198,6 +211,7 @@ jobs:
               d = {}
           d.setdefault("projects", {})
           d["projects"][root] = {"hasTrustDialogAccepted": True}
+          # also add with cp-encoding variants as Claude may use either
           os.makedirs(os.path.dirname(p), exist_ok=True)
           json.dump(d, open(p, "w"), indent=2)
           PY
@@ -426,7 +440,8 @@ jobs:
             "List three benefits of test automation, one per line"
           )
           export PATH="$HOME/.opencode/bin:$PATH"
-          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$LOCALAPPDATA/hermes/bin:$PATH"
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+          if [ -n "${LOCALAPPDATA:-}" ]; then export PATH="$LOCALAPPDATA/hermes/bin:$PATH"; fi
           export ANTHROPIC_BASE_URL="http://127.0.0.1:6767"
           export OPENAI_BASE_URL="http://127.0.0.1:6767/v1"
 

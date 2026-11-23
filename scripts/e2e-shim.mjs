@@ -60,10 +60,15 @@ function toOpenAI(body) {
   // Accepts either Anthropic /v1/messages (body.messages), OpenAI
   // /chat/completions (body.model + body.messages) or OpenAI /v1/responses
   // (body.model + body.input). Always routes to MODEL.
+  // Clamp max_tokens: Pi sends 64000 by default, but Scaleway caps
+  // deepseek-v4.1-flash-1017 at 32768 -> anything above is a 400.
+  const MAX_TOKENS = 32768;
+  const requested = Number(body.max_tokens ?? body.max_completion_tokens ?? 256);
+  const mx = Number.isFinite(requested) && requested > 0 ? Math.min(requested, MAX_TOKENS) : 256;
   return {
     model: MODEL,
     messages: Array.isArray(body.messages) ? toMessages(body) : inputToMessages(body),
-    max_tokens: body.max_tokens ?? body.max_completion_tokens ?? 256,
+    max_tokens: mx,
     temperature: body.temperature ?? undefined,
     stream: false, // we always collect the full upstream answer, then stream locally
   };
