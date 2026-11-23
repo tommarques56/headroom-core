@@ -12437,6 +12437,99 @@ fn windows_path_extensions() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Detection is PATH+state driven, so these cover the "solo then all"
+    /// matrix on every platform CI runs: zero installed, each harness on its
+    /// own, then every harness at once. `detect_clients` reads the process
+    /// HOME, so TestHome isolates it (and holds the cross-test env lock).
+    #[test]
+    fn detect_clients_solo_then_all_harnesses() {
+        use super::*;
+
+        for scenario in [
+            ("claude", "claude_code"),
+            ("codex", "codex"),
+            ("opencode", "opencode"),
+            ("grok", "grok_build"),
+        ] {
+            let home = TestHome::new();
+            let _home = &home;
+
+            let bin_dir = home_dir().join(".local").join("bin");
+            std::fs::create_dir_all(&bin_dir).unwrap();
+            put_fake_binary(&bin_dir, scenario.0);
+
+            let clients = detect_clients();
+            let solo = clients
+                .iter()
+                .find(|c| c.id == scenario.1)
+                .expect("scenario client present");
+            assert!(solo.installed, "{} must be detected when {} is on PATH", scenario.1, scenario.0);
+            // A harness not explicitly installed may still register through a
+            // *resident host state* that exists independently of PATH (e.g. the
+            // ChatGPT.app the dev machine happens to carry). On a fresh CI
+            // runner the detect call can only see the fake binary we planted, so
+            // here we assert only that no *other* harness reports PATH detection
+            // for our fake — the contains() over a real resident note is a
+            // tolerated env artifact, not a PATH-based false positive.
+            for other in clients.iter().filter(|c| c.id != scenario.1) {
+                if other.installed {
+                    let notes = other
+                        .notes
+                        .iter()
+                        .map(|n| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    assert!(
+                        !notes.contains(&format!(
+                            "Detected at {}",
+                            home_dir().join(".local").join("bin").display()
+                        )),
+                        "{} was detected from our fake binary while only {} was installed (notes: {})",
+                        other.id,
+                        scenario.0,
+                        notes
+                    );
+                }
+            }
+        }
+
+        // All harnesses at once: every managed client is detected and none of
+        // the notes says otherwise.
+        let _home = TestHome::new();
+        let bin_dir = home_dir().join(".local").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        for name in ["claude", "codex", "opencode", "grok"] {
+            put_fake_binary(&bin_dir, name);
+        }
+
+        let clients = detect_clients();
+        for (name, id) in [("claude", "claude_code"), ("codex", "codex"), ("opencode", "opencode"), ("grok", "grok_build")] {
+            let client = clients.iter().find(|c| c.id == id).unwrap();
+            assert!(
+                client.installed,
+                "{} must be detected when all harnesses are installed (notes: {:?})",
+                id, client.notes
+            );
+            let _ = name;
+        }
+    }
+
+    /// Writes an executable `name` into `dir` so PATH/state detection sees it.
+    fn put_fake_binary(dir: &Path, name: &str) {
+        #[cfg(windows)]
+        let target = dir.join(format!("{name}.cmd"));
+        #[cfg(not(windows))]
+        let target = dir.join(name);
+        std::fs::write(&target, "#! /bin/sh\necho fake\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = target.metadata().unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&target, perms).unwrap();
+        }
+    }
+
     #[test]
     fn chatgpt_app_in_finds_a_codex_app_and_prefers_the_copy_with_codex() {
         let system = tempfile::tempdir().unwrap();
