@@ -56,7 +56,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ steps.tag.outputs.tag }}"
-          gh release download "$tag" --pattern 'Headroom_*_mac.dmg' --dir "$RUNNER_TEMP/installer" --clobber
+          # gh release download needs a git worktree for tag resolution; this
+          # job never checks out, so fetch the asset through the REST API.
+          asset_url="$(gh api "repos/tommarques56/headroom-core/releases/tags/${tag}" \
+            --jq '.assets[] | select(.name | test("_mac\\.dmg$")) | .browser_download_url')"
+          mkdir -p "$RUNNER_TEMP/installer"
+          curl -fsSL -o "$RUNNER_TEMP/installer/headroom.dmg" "$asset_url"
           ls -la "$RUNNER_TEMP/installer"
 
       - name: Mount the DMG and copy the app into /Applications
@@ -132,7 +137,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download "${{ needs.define-tag.outputs.tag }}" --pattern '*.x64-setup.exe' --dir "$env:RUNNER_TEMP\installer" --clobber
+          $tag = "${{ needs.define-tag.outputs.tag }}"
+          $assetUrl = gh api "repos/tommarques56/headroom-core/releases/tags/$tag" `
+            --jq '.assets[] | select(.name | test("\\.x64-setup\\.exe$")) | .browser_download_url'
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\installer" | Out-Null
+          curl.exe -fsSL -o "$env:RUNNER_TEMP\installer\headroom-setup.exe" $assetUrl
           Get-ChildItem "$env:RUNNER_TEMP\installer"
 
       - name: Install silently to a normal Program Files path
@@ -220,8 +229,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ steps.tag.outputs.tag }}"
+          # gh release download needs a git worktree; this job never checks out.
+          asset_url="$(gh api "repos/tommarques56/headroom-core/releases/tags/${tag}" \
+            --jq '.assets[] | select(.name | test("\\.AppImage$")) | .browser_download_url')"
           mkdir -p "$RUNNER_TEMP/installer"
-          gh release download "$tag" --pattern '*.AppImage' --dir "$RUNNER_TEMP/installer" --clobber
+          curl -fsSL -o "$RUNNER_TEMP/installer/headroom.AppImage" "$asset_url"
           ls -la "$RUNNER_TEMP/installer"
           chmod +x "$RUNNER_TEMP"/installer/*.AppImage
 
