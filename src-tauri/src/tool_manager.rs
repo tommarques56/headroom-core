@@ -12576,24 +12576,55 @@ struct UpstreamSpawnEnv {
     lossless: &'static str,
 }
 
+/// Whether `url` names this machine: localhost, 127.0.0.0/8 or ::1, also
+/// when written IPv4-mapped (::ffff:127.0.0.1).
+///
+/// This drives the lossless-vs-full decision for a configured upstream: a
+/// LOOPBACK endpoint is a local proxy/LM sidecar the user runs on their own
+/// machine (often headroom itself or a local gateway), not a third-party
+/// Anthropic-COMPATIBLE cloud provider whose tolerance for a rewritten
+/// payload is unknown. Reusing the exact normalisation the intercept layer
+/// already applies keeps the two call sites consistent.
+fn upstream_is_loopback(url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.trim_matches(['[', ']']).to_string()))
+    else {
+        return false;
+    };
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
 /// Translate the user's override into that env.
 ///
 /// All three are always set, so a spawn after the override was cleared cannot
 /// inherit the previous one from the environment. Empty is what the runtime's
 /// `_get_env_str` already treats as unset, so the default case is inert.
 ///
-/// `HEADROOM_LOSSLESS` rides along with any configured upstream: these
-/// endpoints are Anthropic-COMPATIBLE rather than Anthropic, and lossless
-/// compaction keeps the payload shape close to what the client sent while
-/// still saving tokens. It is deliberately keyed on "an upstream is
-/// configured", not on the mode -- a Fallback upstream serves the same
-/// third-party endpoint.
+/// `HEADROOM_LOSSLESS` rides along with a NON-LOCAL configured upstream: these
+/// remote endpoints are Anthropic-COMPATIBLE rather than Anthropic, and
+/// lossless compaction keeps the payload shape close to what the client sent
+/// while still saving tokens. It is deliberately keyed on "an upstream is
+/// configured" -- not on the mode, a Fallback upstream serves the same
+/// third-party endpoint. A loopback endpoint is exempted: it is a proxy the
+/// user runs on this machine, so the full pipeline (lossy Kompress/code-aware,
+/// CCR markers, transparent in the transport layer) is as safe against it as
+/// against Anthropic itself, and forcing lossless there silently disables
+/// compression -- the product's core value -- on the gateway most power users
+/// actually route Claude Code through (a local aggregator).
 fn upstream_spawn_env(upstream: &crate::state::UpstreamOverride) -> UpstreamSpawnEnv {
-    let configured = upstream.configured_upstream();
+    let configured = upstream.configured_upstream().map(str::to_owned);
+    let lossless = match configured.as_deref() {
+        Some(url) if !upstream_is_loopback(url) => "1",
+        _ => "0",
+    };
     UpstreamSpawnEnv {
-        target_api_url: configured.unwrap_or_default().to_string(),
+        target_api_url: configured.unwrap_or_default(),
         pin_upstream: if upstream.pins_upstream() { "1" } else { "0" },
-        lossless: if configured.is_some() { "1" } else { "0" },
+        lossless,
     }
 }
 
@@ -23061,6 +23092,39 @@ time.sleep(30)
         assert_eq!(empty.target_api_url, "");
         assert_eq!(empty.pin_upstream, "0");
         assert_eq!(empty.lossless, "0");
+
+        // A LOOPBACK upstream (local aggregator/proxy the user runs on this
+        // machine) keeps the full compression pipeline too: it is as trusted
+        // as Anthropic itself, and forcing lossless there would silently
+        // disable compression for the gateway power users actually route
+        // Claude Code through. This is gateway-agnostic: it only keys on the
+        // endpoint being this machine, never on who it proxies to.
+        for (label, host) in [
+            ("127.0.0.1 with port", "http://127.0.0.1:8788"),
+            ("localhost", "https://localhost:8443/api/anthropic"),
+            ("ipv6 loopback", "http://[::1]:8090"),
+            ("ipv4-mapped loopback", "http://[::ffff:127.0.0.1]:8000"),
+            ("127.5.5.5 (127/8)", "http://127.5.5.5:8080"),
+        ] {
+            let local = upstream_spawn_env(&UpstreamOverride {
+                mode: UpstreamOverrideMode::Override,
+                base_url: host.into(),
+                has_token: true,
+                ..Default::default()
+            });
+            assert_eq!(local.lossless, "0", "expected full pipeline for {label} ({host})");
+            assert_eq!(local.pin_upstream, "1", "override pins {label}");
+        }
+
+        // A non-loopback remote upstream still gets the conservative lossless
+        // posture: unknown tolerance for a rewritten payload.
+        let remote = upstream_spawn_env(&UpstreamOverride {
+            mode: UpstreamOverrideMode::Override,
+            base_url: "https://gateway.example.com/v1".into(),
+            has_token: true,
+            ..Default::default()
+        });
+        assert_eq!(remote.lossless, "1");
     }
 
     /// Override mode has to survive a cc-switch provider switch, and the
