@@ -11628,6 +11628,31 @@ else:
         sys.exit(0)
 updated = dict(tool_input)
 updated["command"] = os.environ["HEADROOM_RTK_REWRITTEN"]
+
+# Record this rewrite in RTK own ledger so `rtk gain` attributes it (and
+# stops prompting "run `rtk init -g` for a second hook"): the native
+# processor writes the hook decision for the ORIGINAL input we just judged.
+# Our rewrite above stays authoritative for Claude Code; only the ledger
+# side effect is wanted, so its output goes to /dev/null. A short timeout
+# guards the Bash tool against a wedged processor; its ~30ms run is far
+# below it.
+try:
+    import subprocess
+    rtk_bin = os.environ.get("HEADROOM_RTK_BIN")
+    if rtk_bin:
+        env = dict(os.environ)
+        env["RTK_SUPPRESS_HOOK_WARNING"] = "1"
+        env["PATH"] = os.path.dirname(rtk_bin) + os.pathsep + env.get("PATH", "")
+        subprocess.run(
+            [rtk_bin, "hook", "claude"],
+            input=json.dumps(data).encode(),
+            capture_output=True,
+            timeout=5,
+            env=env,
+        )
+except Exception:
+    pass
+
 json.dump({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Headroom RTK auto-rewrite", "updatedInput": updated}}, sys.stdout)
 "##;
 
@@ -11750,6 +11775,7 @@ fi
 REWRITTEN="export PATH=$HEADROOM_RTK_DIR_Q:\"\$PATH\" RTK_SUPPRESS_HOOK_WARNING=1; $REWRITTEN"
 
 HEADROOM_RTK_RC="$RTK_RC" HEADROOM_RTK_OUT="$RTK_OUT" HEADROOM_RTK_REWRITTEN="$REWRITTEN" \
+  HEADROOM_RTK_BIN="$HEADROOM_RTK" \
   "$HEADROOM_PYTHON" -X utf8 -c '{rules}{verdict}' <<<"$INPUT" 2>/dev/null || exit 0
 "#,
         rules = HOOK_RULES_PY,
@@ -13104,6 +13130,14 @@ mod tests {
         assert!(hook.contains("HEADROOM_PYTHON=\"/tmp/head room/runtime/\\$python\""));
         assert!(hook.contains("Headroom RTK auto-rewrite"));
         assert!(hook.contains("\"updatedInput\": updated"));
+        // Each allow-rewrite must be recorded in RTK's own ledger so `rtk
+        // gain` attributes it: the native processor is invoked on the ORIGINAL
+        // input before our authoritative rewrite is returned, with a timeout
+        // so a wedged processor never delays the Bash tool.
+        assert!(hook.contains("HEADROOM_RTK_BIN=\"$HEADROOM_RTK\""));
+        assert!(hook.contains("\"hook\", \"claude\""));
+        assert!(hook.contains("subprocess.run"));
+        assert!(hook.contains("timeout=5"));
     }
 
     #[test]
