@@ -564,6 +564,7 @@ mod tests {
     // so the spawn inside is_runnable can only fail; the positive path is
     // covered by the real-Windows smoke test instead.
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn is_runnable_accepts_working_executable() {
         let tmp = ScopedTempDir::new("runnable_ok");
         let path = tmp.path().join("claude");
@@ -573,6 +574,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn is_runnable_rejects_executable_that_fails_to_spawn() {
         // Regression: an x86_64-only Homebrew leftover at /usr/local/bin/claude
         // on an arm64 Mac satisfied the POSIX exec bit but the kernel returned
@@ -590,6 +592,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn is_runnable_rejects_executable_that_exits_non_zero() {
         let tmp = ScopedTempDir::new("runnable_exit1");
         let path = tmp.path().join("claude");
@@ -611,6 +614,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn probe_on_path_rejects_an_existing_but_broken_entry() {
         let _env_lock = crate::test_env_lock::lock_home();
         let tmp = ScopedTempDir::new("path_broken");
@@ -629,6 +633,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn first_runnable_walks_past_broken_candidates() {
         // Reproduces the production scenario: an Intel-only `/usr/local/bin/claude`
         // remnant on an arm64 Mac is the second candidate examined; the first
@@ -659,6 +664,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn first_runnable_returns_none_when_all_candidates_broken() {
         let tmp = ScopedTempDir::new("first_runnable_none");
         let broken = tmp.path().join("broken");
@@ -677,6 +683,7 @@ mod tests {
     /// missed) a yarn-global codex showed as installed while Learn refused it.
     #[test]
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn known_path_candidates_find_a_cli_in_user_bin_and_shim_dirs() {
         let tmp = ScopedTempDir::new("known_user_dirs");
         // Unique name: no real install in /opt/homebrew or /usr/local shadows it.
@@ -756,6 +763,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn is_runnable_finds_colocated_interpreter_via_augmented_path() {
         // Regression: nvm/volta/bun/asdf installs of `claude` are
         // `#!/usr/bin/env <interp>` scripts with the interpreter colocated in
@@ -867,6 +875,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn is_runnable_kills_and_rejects_a_hung_executable() {
         // A binary that hangs forever must not stall detection. We override
         // the timeout indirectly by invoking wait_with_timeout directly with
@@ -898,6 +907,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn read_path_from_shell_returns_path_before_shell_exits() {
         // Regression: interactive shells print the `command -v claude` output
         // immediately but keep running through `.zshrc`. Previously we waited
@@ -1003,6 +1013,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn read_path_from_shell_skips_rc_file_banner_lines() {
         // Regression: `zsh -ilc` sources .zshrc before running `command -v`, so
         // anything the user's rc file prints lands on the pipe first. Taking the
@@ -1026,6 +1037,7 @@ mod tests {
     // On Windows the /bin/sh spawn fails outright, returning None immediately
     // and passing both asserts without exercising the timeout at all.
     #[cfg(unix)]
+    #[serial_test::serial(path_env)]
     fn read_path_from_shell_times_out_when_no_output() {
         let mut cmd = crate::proc::command("/bin/sh");
         cmd.arg("-c").arg("sleep 30");
