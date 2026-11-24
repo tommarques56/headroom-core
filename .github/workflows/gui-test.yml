@@ -51,8 +51,17 @@ jobs:
           pgrep -lf "Dock$" >/dev/null && echo "Dock running (Aqua session OK)" || echo "WARN no Dock"
           node --version && npm --version && cargo --version
 
+      - name: Start video capture
+        run: |
+          mkdir -p /tmp/gui-proof
+          bash ./scripts/gui-capture.sh start /tmp/gui-proof || true
+
       - name: Run real-GUI test
         run: bash ./scripts/woodpecker-gui-test.sh macos
+
+      - name: Stop video capture
+        if: always()
+        run: bash ./scripts/gui-capture.sh stop /tmp/gui-proof || true
 
       - name: Screenshot proof (GUI visible)
         if: always()
@@ -96,6 +105,11 @@ jobs:
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
           node --version && npm --version && cargo --version
 
+      - name: Start video capture
+        run: |
+          mkdir -p /tmp/gui-proof
+          bash ./scripts/gui-capture.sh start /tmp/gui-proof || true
+
       - name: Run real-GUI test
         run: bash ./scripts/woodpecker-gui-test.sh linux
 
@@ -107,6 +121,10 @@ jobs:
           DISPLAY=:99 scrot /tmp/gui-proof/linux-desktop.png 2>/dev/null \
             || DISPLAY=:99 import -window root /tmp/gui-proof/linux-desktop.png 2>/dev/null || true
           ls -la /tmp/gui-proof/ 2>/dev/null || true
+
+      - name: Stop video capture
+        if: always()
+        run: bash ./scripts/gui-capture.sh stop /tmp/gui-proof || true
 
       - name: Upload artifact
         if: always()
@@ -149,8 +167,29 @@ jobs:
           # toolchain is visible in the runner session.
           node --version && npm --version && cargo --version
 
+      - name: Start video capture
+        shell: bash
+        run: |
+          mkdir -p /tmp/gui-proof
+          bash ./scripts/gui-capture.sh start /tmp/gui-proof || true
+
       - name: Run real-GUI test
         run: bash ./scripts/woodpecker-gui-test.sh windows
+
+      - name: Stop video capture
+        if: always()
+        shell: bash
+        run: bash ./scripts/gui-capture.sh stop /tmp/gui-proof || true
+        # On Windows, msys path /tmp maps to the runner's temp; copy artifact
+        # into C:\gui-proof beside the screenshot.
+        continue-on-error: true
+
+      - name: Move video into proof dir (Windows)
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p /c/gui-proof
+          cp -f /tmp/gui-proof/gui-test.mp4 /c/gui-proof/ 2>/dev/null || true
 
       - name: Screenshot proof (GUI visible)
         if: always()

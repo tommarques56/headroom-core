@@ -30,12 +30,19 @@ step "repo $REPO @ $(git rev-parse --short HEAD 2>/dev/null)"
 # --- 1. build the app --------------------------------------------------------
 step "build GUI"
 [ -d node_modules ] || npm ci --silent
-# vite 8 uses rolldown; the win32-x64-msvc native binding is an optional
-# dependency occasionally skipped on first install on Windows runners.
-if [ "$OS" = "windows" ] && [ -d node_modules/rolldown ]; then
-  npm install --no-save --no-audit --no-fund @rolldown/binding-win32-x64-msvc >/dev/null 2>&1 \
-    && node -e "require('@rolldown/binding-win32-x64-msvc');console.log('  rolldown binding OK')" 2>/dev/null \
-    || echo "  WARN rolldown binding not restored"
+# vite 8 uses rolldown, whose native binding is declared as an optionalDependency.
+# npm has a known bug (#4828) that skips optional deps on first `npm ci` on some
+# machines; force-install the correct native binding per-OS so the vite build
+# can find it (mirrors every OS runner: windows msvc, darwin arm64, linux gnu).
+case "$OS" in
+  windows) ROLDDEP="@rolldown/binding-win32-x64-msvc" ;;
+  macos)   ROLDDEP="@rolldown/binding-darwin-arm64" ;;
+  linux)   ROLDDEP="@rolldown/binding-linux-x64-gnu" ;;
+esac
+if [ -d node_modules/rolldown ]; then
+  npm install --no-save --no-audit --no-fund "$ROLDDEP" >/dev/null 2>&1 \
+    && node -e "console.log('  rolldown binding OK:', process.platform, process.arch)" 2>/dev/null \
+    || echo "  WARN could not restore rolldown native binding ($ROLDDEP)"
 fi
 if npm run tauri build -- --no-bundle >/tmp/tauri-build.log 2>&1; then
   pass "tauri build"
