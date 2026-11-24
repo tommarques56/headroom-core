@@ -28,8 +28,8 @@ case "$ACTION" in
     if is_windows; then
       ffmpeg -y -f gdigrab -framerate 10 -i desktop -c:v libx264 -preset ultrafast -pix_fmt yuv420p "$MP4" >/tmp/capture.log 2>&1 &
     elif [ "$OS" = "Darwin" ]; then
-      # macOS: capture the main display (avfoundation "1:" is the built-in screen)
-      ffmpeg -y -f avfoundation -framerate 10 -video_size 1280x800 -i "1:" -c:v libx264 -preset ultrafast -pix_fmt yuv420p "$MP4" >/tmp/capture.log 2>&1 &
+      # macOS: "Capture screen 0" is the built-in display (avfoundation)
+      ffmpeg -y -f avfoundation -framerate 10 -video_size 1440x900 -i "0:" -c:v libx264 -preset ultrafast -pix_fmt yuv420p "$MP4" >/tmp/capture.log 2>&1 &
     else
       # Linux: grab the Xvfb framebuffer
       DISPLAY="${DISPLAY:-:99}" ffmpeg -y -f x11grab -framerate 10 -video_size 1400x900 -i "$DISPLAY+0,0" -c:v libx264 -preset ultrafast -pix_fmt yuv420p "$MP4" >/tmp/capture.log 2>&1 &
