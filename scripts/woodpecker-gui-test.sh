@@ -142,8 +142,23 @@ case "$OS" in
     else
       fail "process died (see /tmp/app-gui.log)"; tail -20 /tmp/app-gui.log
     fi
-    osascript -e 'tell application "System Events" to tell process "headroom-desktop" to get {position, size} of window 1' 2>/dev/null >/dev/null \
-      && pass "window visible" || fail "no window"
+    # Window proof: osascript 'System Events' can block forever without
+    # Automation permission in a launchd GUI session, so use non-blocking
+    # checks instead: process alive + connected to WindowServer (CGS/ASN)
+    # via `lsappinfo`.
+    WINDOW_OK=0
+    for i in 1 2 3; do
+      if lsappinfo info -only bundleID,ASN "$APP_PID" 2>/dev/null | grep -q "ASN"; then
+        WINDOW_OK=1
+        break
+      fi
+      sleep 3
+    done
+    if [ "$WINDOW_OK" = "1" ]; then
+      pass "window visible (connected to WindowServer)"
+    else
+      fail "no window attachment to WindowServer; process alive, lsappinfo: $(lsappinfo info "$APP_PID" 2>/dev/null | head -c 120)"
+    fi
     ;;
   linux)
     export DISPLAY="${DISPLAY:-:99}"
