@@ -12826,9 +12826,12 @@ fn show_main_window(
         position_near_panel(&window)?;
     }
 
-    // macOS stays a menu-bar popover: an accessory app has no Dock icon to
-    // bring a window back from.
-    let windowed = windowed && cfg!(not(target_os = "macos"));
+    // macOS shows a Dock icon (0.9.69): the user asked the window to STAY
+    // visible when another app passes in front (not hide-on-blur like a
+    // menu-bar popover). Force windowed on macOS so Focused(false) does not
+    // auto-hide the window; closing it (yellow button) still hides it to the
+    // tray via handle_window_event CloseRequested.
+    let windowed = windowed || cfg!(target_os = "macos");
     MAIN_WINDOW_WINDOWED.store(windowed, Ordering::Release);
     window.show()?;
     // After show(): the shell re-adds the button of a window it shows.
