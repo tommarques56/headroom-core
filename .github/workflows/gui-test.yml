@@ -1,0 +1,148 @@
+name: GUI Real-Desktop Test
+
+# Runs the REAL desktop GUI test on the 3 self-hosted GUI runners
+# (macOS / Linux / Windows), not the headless backend.
+#
+# Each runner is attached to a live graphical session:
+#   - macOS  -> Aqua session (auto-login, VNC :59010)
+#   - Linux  -> Xvfb :99 (1600x1000) systemd service
+#   - Windows-> interactive desktop session (SessionId 2, scheduled task /IT)
+#
+# The driver (scripts/woodpecker-gui-test.sh) does on each OS:
+#   1. builds the Tauri app
+#   2. launches it as a REAL GUI window
+#   3. asserts the window is actually visible (osascript / xdotool / tasklist)
+#   4. checks desktop harness MCP configs (Claude Desktop / Cursor / ChatGPT)
+#   5. sends a chat completion through the app's backend and asserts /stats
+#      reports compressed tokens (compression works end-to-end)
+#
+# Additionally every job snapshots the desktop AFTER launching the app so a
+# human can SEE the window in the uploaded artifact (screenshot proof).
+
+on:
+  push:
+    branches:
+      - main
+      - nov23-backlog
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+
+  # --------------------------------------------------------------------------
+  # macOS — session Aqua (window visible on the real desktop, VNC :59010)
+  # --------------------------------------------------------------------------
+  gui-macos:
+    runs-on: [self-hosted, gui, macOS, ARM64]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Ensure managed GUI session
+        run: |
+          echo "console user: $(stat -f '%Su' /dev/console)"
+          pgrep -lf "Dock$" >/dev/null && echo "Dock running (Aqua session OK)" || echo "WARN no Dock"
+
+      - name: Run real-GUI test
+        run: bash ./scripts/woodpecker-gui-test.sh macos
+
+      - name: Screenshot proof (GUI visible)
+        if: always()
+        run: |
+          mkdir -p /tmp/gui-proof
+          sleep 2
+          screencapture -x /tmp/gui-proof/macos-desktop.png 2>/dev/null \
+            || osascript -e 'tell app "System Events" to display alert "GUI proof"' >/dev/null 2>&1 || true
+          ls -la /tmp/gui-proof/ 2>/dev/null || true
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d687a # v4.4.0
+        with:
+          name: gui-proof-macos
+          path: |
+            /tmp/gui-proof/
+            /tmp/app-gui.log
+            /tmp/tauri-build.log
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # Linux — Xvfb :99 (systemd service, persistent)
+  # --------------------------------------------------------------------------
+  gui-linux:
+    runs-on: [self-hosted, gui, Linux, X64]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Ensure Xvfb display
+        run: |
+          DISPLAY=:99 xdpyinfo >/dev/null 2>&1 \
+            && echo "Xvfb :99 OK ($(DISPLAY=:99 xdpyinfo | grep dimensions))" \
+            || echo "WARN Xvfb not reachable, driver will retry"
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Run real-GUI test
+        run: bash ./scripts/woodpecker-gui-test.sh linux
+
+      - name: Screenshot proof (GUI visible)
+        if: always()
+        run: |
+          mkdir -p /tmp/gui-proof
+          sleep 2
+          DISPLAY=:99 scrot /tmp/gui-proof/linux-desktop.png 2>/dev/null \
+            || DISPLAY=:99 import -window root /tmp/gui-proof/linux-desktop.png 2>/dev/null || true
+          ls -la /tmp/gui-proof/ 2>/dev/null || true
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d687a # v4.4.0
+        with:
+          name: gui-proof-linux
+          path: |
+            /tmp/gui-proof/
+            /tmp/app-gui.log
+            /tmp/tauri-build.log
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # Windows — interactive desktop session (SessionId 2 via scheduled task)
+  # --------------------------------------------------------------------------
+  gui-windows:
+    runs-on: [self-hosted, gui, Windows, X64]
+    timeout-minutes: 45
+    defaults:
+      run:
+        # The runner listener lives in the interactive desktop session; use cmd
+        # so Git Bash/MSYS quirks don't break path handling for the driver.
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run real-GUI test
+        run: bash ./scripts/woodpecker-gui-test.sh windows
+
+      - name: Screenshot proof (GUI visible)
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\gui-proof | Out-Null
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("C:\gui-proof\windows-desktop.png")
+          Write-Output "saved C:\gui-proof\windows-desktop.png"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d687a # v4.4.0
+        with:
+          name: gui-proof-windows
+          path: |
+            C:\gui-proof\
+          if-no-files-found: ignore
