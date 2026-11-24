@@ -778,6 +778,17 @@ mod tests {
             return;
         }
         let before = std::fs::read(&path).unwrap();
+        // Production refuses to touch a non-Toml config (see
+        // upsert_toml_entry: "not valid TOML; refusing to touch it"), so a
+        // runner sandbox with a stale/odd ~/.codex/config.toml must not fail
+        // this golden test either -- skip it just like production would.
+        if String::from_utf8_lossy(&before).parse::<toml::Table>().is_err() {
+            eprintln!(
+                "skipping: {} is not valid TOML (runner sandbox file)",
+                path.display()
+            );
+            return;
+        }
 
         let dir = tempfile::tempdir().unwrap();
         let copy = dir.path().join("config.toml");
