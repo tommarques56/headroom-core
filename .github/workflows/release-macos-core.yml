@@ -64,11 +64,37 @@ jobs:
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --skip against_the_installed_wheel
 
+      - name: Install Apple signing certificate
+        # Imports the Apple Development p12 (stored as a repo secret) so the
+        # app is signed with a stable Team ID. Ad-hoc signing (no identity)
+        # makes macOS TCC forget the ~/Documents grant on every relaunch and
+        # re-prompt for Keychain; a stable Apple Development signature fixes
+        # both: 1 Documents prompt total, 0 Keychain prompts.
+        env:
+          APPLE_CERT_P12_B64: ${{ secrets.APPLE_CERT_P12_B64 }}
+          APPLE_CERT_P12_PASSWORD: ${{ secrets.APPLE_CERT_P12_PASSWORD }}
+          KEYCHAIN: "${{ runner.temp }}/headroom-signing.keychain-db"
+        run: |
+          set -euo pipefail
+          echo "$APPLE_CERT_P12_B64" | base64 -d > /tmp/cert.p12
+          # Create and unlock a dedicated, ephemeral signing keychain so the
+          # identity does not linger in the runner's login keychain.
+          security create-keychain -p "runnerpass" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "runnerpass" "$KEYCHAIN"
+          security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$APPLE_CERT_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productbuild 2>&1
+          security set-key-partition-list -S apple-tool:,apple: -s -k "runnerpass" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          echo "APPLE_SIGNING_IDENTITY=${{ vars.APPLE_SIGNING_IDENTITY }}" >> "$GITHUB_ENV"
+          echo "Identity check:"
+          security find-identity -v -p codesigning "$KEYCHAIN" | head -5
+
       - name: Build the universal app
         run: npx tauri build --target universal-apple-darwin
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
 
       - name: Prepare release assets
         run: |

@@ -1,6 +1,6 @@
 {
   "name": "headroom-desktop",
-  "version": "0.9.70",
+  "version": "0.9.71",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "test:frontend": "vitest run",
     "test:coverage": "vitest run --coverage.enabled --coverage.provider=v8",
     "test:desktop": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:gateway": "node backend/gateway/test/gateway.test.mjs",
     "test:all": "npm run test:frontend && npm run test:desktop",
     "release:check": "./scripts/verify-release.sh",
     "check:colors": "./scripts/check-colors.sh",

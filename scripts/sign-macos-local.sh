@@ -20,7 +20,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_PATH="${1:-/Applications/Headroom.app}"
-BRANCH_APP="${REPO_ROOT}/headroom-desktop/src-tauri/target/release/bundle/macos/Headroom.app"
+BRANCH_APP="${REPO_ROOT}/src-tauri/target/release/bundle/macos/Headroom.app"
 if [ ! -d "$APP_PATH" ] && [ -d "$BRANCH_APP" ]; then
   APP_PATH="$BRANCH_APP"
 fi
@@ -35,7 +35,7 @@ IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -oE '"[^
 [ -n "$IDENTITY" ] || { echo "::error:: Aucune identité codesigning (Apple Development) trouvée." >&2; exit 1; }
 echo "→ Identité: $IDENTITY"
 
-ENTITLEMENTS_SRC="${REPO_ROOT}/headroom-desktop/src-tauri/Entitlements.plist"
+ENTITLEMENTS_SRC="${REPO_ROOT}/src-tauri/Entitlements.plist"
 [ -f "$ENTITLEMENTS_SRC" ] || { echo "::error:: Entitlements.plist introuvable: $ENTITLEMENTS_SRC" >&2; exit 1; }
 
 # ── 2. Quitter toute instance en cours (évite les locks et TCC fantômes) ───
