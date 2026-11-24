@@ -28,6 +28,20 @@
 ; uninstaller from a %TEMP% copy, so a real uninstall (Windows Settings, a
 ; double-clicked uninstall.exe, the in-app uninstall's `/S` launch) never runs
 ; from $INSTDIR and still gets the full cleanup.
+
+; Runs before install/update copies files over. The app holds the single-instance
+; lock and usually sits in the tray, so a fresh install or an update would
+; otherwise hit the template's "Headroom is already running" page and refuse to
+; replace the exe. Kill the running process so the files can be swapped; user
+; data under %LOCALAPPDATA% and ~\.headroom is left untouched (updates keep it,
+; and the PREUNINSTALL hook handles uninstall cleanup).
+!macro NSIS_HOOK_PREINSTALL
+  nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
+  Pop $0
+  ; A 1 means the process was not found (nothing to kill) or is already gone.
+  Sleep 500
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
   ${If} $UpdateMode <> 1
   ${AndIf} $EXEDIR != $INSTDIR
