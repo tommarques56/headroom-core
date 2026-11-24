@@ -7,6 +7,12 @@
 # for 0.28.0 (base of the current pin set) -> carried through 0.29.0-0.31.0
 # point-version churn -> 0.32.0 -> carried unchanged to 0.33.0 -> 0.34.0
 # CVE top-up -> 0.35.0 CVE top-up -> carried to 0.37.0 -> 0.38.0 CVE top-up.
+#   - 2026-11-24 (v0.9.68): cffi 2.0.0 -> 2.1.1. The 2.0.0 wheels' hashes no
+#     longer match anything pip resolves (neither the vendored wheel bucket
+#     nor PyPI: wheels were re-published), so `pip install <this lock>` failed
+#     in the macOS release smoke test ("No matching distribution found").
+#     2.1.1 is the current stable; cp312 macosx_11_0_arm64 + macosx_10_15_x86_64
+#     hashes (the two Apple Silicon/Intel wheels the universal build needs).
 #   - 2026-09-29 CVE top-up alongside hash pinning (pip-audit now gates CI):
 #     pyjwt 2.13.0 -> 2.14.0 (CVE-2026-102274, a malformed RSA key aborts
 #     parsing of a whole JWK Set) and datasets 5.0.0 -> 5.0.1 (CVE-2026-66007,
@@ -179,9 +185,9 @@ babel==2.18.0 \
     --hash=sha256:e2b422b277c2b9a9630c1d7903c2a00d0830c409c59ac8cae9081c92f1aeba35
 certifi==2026.10.19 \
     --hash=sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b
-cffi==2.0.0 \
-    --hash=sha256:6d02d6655b0e54f54c4ef0b94eb6be0607b70853c45ce98bd278dc7de718be5d \
-    --hash=sha256:8eca2a813c1cb7ad4fb74d368c2ffbbb4789d377ee5bb8df98373c2cc0dee76c
+cffi==2.1.1 \
+    --hash=sha256:c8c69575568085ba0b1b10c0249d779a214aea6f6522e949a0fc9fb0fcb449d0 \
+    --hash=sha256:f81b3b8f3d4e343550fa4baa0e479bba9f2d29ce9c2e9b51d1ce1718d7442fcf
 charset-normalizer==3.4.7 \
     --hash=sha256:3dce51d0f5e7951f8bb4900c257dad282f49190fdbebecd4ba99bcc41fef404d \
     --hash=sha256:eca9705049ad3c7345d574e3510665cb2cf844c2f2dcfe675332677f081cbd46
