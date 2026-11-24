@@ -138,7 +138,13 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           tag="v${version}"
-          gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          # First tag run for a version: the release does not exist yet.
+          # `gh release upload` fails with "release not found", so create it
+          # (with the built assets) instead of failing the pipeline.
+          gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY" || {
+            echo "Release $tag not found; creating it now." >&2
+            gh release create "$tag" release-assets/* --title "$tag" --notes "Headroom core build ${version}" --repo "$GITHUB_REPOSITORY"
+          }
 
       - name: Upload as workflow artifact
         uses: actions/upload-artifact@v4
@@ -324,7 +330,13 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           tag="v${version}"
-          gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          # First tag run for a version: the release does not exist yet.
+          # `gh release upload` fails with "release not found", so create it
+          # (with the built assets) instead of failing the pipeline.
+          gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY" || {
+            echo "Release $tag not found; creating it now." >&2
+            gh release create "$tag" release-assets/* --title "$tag" --notes "Headroom core build ${version}" --repo "$GITHUB_REPOSITORY"
+          }
 
       - name: Upload as workflow artifact
         uses: actions/upload-artifact@v4

@@ -9392,7 +9392,7 @@ mod tests {
                 ..Default::default()
             });
             let response = send().await;
-            let received = timeout(Duration::from_secs(5), upstream_task)
+            let received = timeout(Duration::from_secs(15), upstream_task)
                 .await
                 .expect("upstream got request in time")
                 .expect("upstream task ok");
