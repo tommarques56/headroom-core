@@ -58,7 +58,9 @@ else
 fi
 
 case "$OS" in
-  macos)   BIN="$REPO/src-tauri/target/debug/bundle/macos/Headroom.app/Contents/MacOS/headroom-desktop";;
+  # --no-bundle builds the bare binary (no .app wrapper), so macOS resolves to
+  # target/debug/headroom-desktop just like the other platforms.
+  macos)   BIN="$REPO/src-tauri/target/debug/headroom-desktop";;
   linux)   BIN="$REPO/src-tauri/target/debug/headroom-desktop";;
   windows) BIN="$REPO/src-tauri/target/debug/headroom-desktop.exe";;
 esac
@@ -72,9 +74,43 @@ step "managed runtime"
 RUNTIME="$HOME/.headroom/runtime"
 VENV_PY="$RUNTIME/venv/bin/python"
 [ "$OS" = "windows" ] && VENV_PY="$RUNTIME/venv/Scripts/python.exe"
-if [ ! -x "$VENV_PY" ]; then
+
+# The runtime is only usable if the headroom CLI exists and pip works; a
+# half-created venv (e.g. without pip because python3-venv is missing on the
+# host OS) must be rebuilt from scratch.
+HR_BIN="$RUNTIME/venv/bin/headroom"
+[ "$OS" = "windows" ] && HR_BIN="$RUNTIME/venv/Scripts/headroom.exe"
+REBUILD=0
+if [ -x "$VENV_PY" ]; then
+  if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+    echo "  WARN venv exists but pip is missing; rebuilding"
+    REBUILD=1
+  fi
+  [ -x "$HR_BIN" ] || { echo "  WARN headroom CLI missing; rebuilding"; REBUILD=1; }
+fi
+if [ "$REBUILD" = 1 ] || [ ! -x "$VENV_PY" ]; then
+  rm -rf "$RUNTIME/venv"
   mkdir -p "$RUNTIME"
-  if python3 -m venv "$RUNTIME/venv" 2>/dev/null || py -m venv "$RUNTIME/venv"; then :; else fail "venv create"; fi
+  # Explicit install locations first (macOS: brew, Linux: deadsnakes/usr,
+  # Windows: python.org). The runner process PATH may predate the install,
+  # so relying on `python` alone is fragile on Windows especially.
+  PY_CANDS="python3.12 python3.11 python3.13 python3 python py"
+  case "$OS" in
+    windows) PY_CANDS="C:\\Python312\\python.exe python3.12 python3.11 python3 python py" ;;
+    macos)   PY_CANDS="/opt/homebrew/bin/python3.12 /usr/local/bin/python3.12 python3.12 python3 python py" ;;
+    linux)   PY_CANDS="/usr/bin/python3.12 python3.12 python3.11 python3 python py" ;;
+  esac
+  PY_BIN=""
+  for cand in $PY_CANDS; do
+    if command -v "$cand" >/dev/null 2>&1; then PY_BIN="$cand"; break; fi
+  done
+  if [ -z "$PY_BIN" ]; then fail "no python found (tried: $PY_CANDS)"; fi
+  echo "  creating venv with $PY_BIN"
+  if "$PY_BIN" -m venv "$RUNTIME/venv" 2>/dev/null; then :; else fail "venv create"; fi
+  # ensure pip (some distros omit it from venv unless python3-venv is present)
+  "$VENV_PY" -m ensurepip --upgrade >/tmp/ensurepip.log 2>&1 || \
+    "$VENV_PY" -m pip install --upgrade pip >/dev/null 2>&1 || \
+    echo "  WARN could not enable pip in venv"
   case "$OS" in
     linux)   LOCK=src-tauri/python/headroom-linux-requirements.lock ;;
     windows) LOCK=src-tauri/python/headroom-windows-requirements.lock ;;
@@ -97,13 +133,14 @@ fi
 step "launch app (GUI)"
 case "$OS" in
   macos)
-    cp -R "$REPO/src-tauri/target/debug/bundle/macos/Headroom.app" "/Applications/Headroom.app" 2>/dev/null || true
-    open -a Headroom >/dev/null 2>&1 || open "$BIN"
+    # --no-bundle build: run the bare binary directly (no .app wrapper).
+    "$BIN" >/tmp/app-gui.log 2>&1 &
+    APP_PID=$!
     sleep 8
-    if osascript -e 'tell application "System Events" to get name of every process' 2>/dev/null | grep -qi "headroom-desktop"; then
+    if kill -0 "$APP_PID" 2>/dev/null; then
       pass "process launched"
     else
-      fail "process not in System Events (needs GUI session)"
+      fail "process died (see /tmp/app-gui.log)"; tail -20 /tmp/app-gui.log
     fi
     osascript -e 'tell application "System Events" to tell process "headroom-desktop" to get {position, size} of window 1' 2>/dev/null >/dev/null \
       && pass "window visible" || fail "no window"
@@ -113,7 +150,13 @@ case "$OS" in
     command -v Xvfb >/dev/null 2>&1 || sudo apt-get install -y -qq xvfb xdotool >/dev/null 2>&1
     (Xvfb :99 -screen 0 1400x900x24 >/tmp/xvfb.log 2>&1 &) 2>/dev/null
     sleep 2
-    "$BIN" >/tmp/app-gui.log 2>&1 &
+    # A session bus is required by GTK/Tauri (appindicator menu etc); launch
+    # the app inside `dbus-run-session` so the window can register properly.
+    if command -v dbus-run-session >/dev/null 2>&1; then
+      dbus-run-session -- "$BIN" >/tmp/app-gui.log 2>&1 &
+    else
+      "$BIN" >/tmp/app-gui.log 2>&1 &
+    fi
     APP_PID=$!
     sleep 8
     if kill -0 "$APP_PID" 2>/dev/null; then
@@ -121,10 +164,16 @@ case "$OS" in
     else
       fail "process died (see /tmp/app-gui.log)"; tail -20 /tmp/app-gui.log
     fi
-    if DISPLAY=:99 xdotool search --name "Headroom" >/dev/null 2>&1; then
+    if DISPLAY=:99 xdotool search --name "Headroom" >/dev/null 2>&1 || \
+       DISPLAY=:99 xdotool search --class "headroom" >/dev/null 2>&1 || \
+       DISPLAY=:99 xdotool search --class "Headroom" >/dev/null 2>&1; then
       pass "window visible"
     else
-      fail "no window found under Xvfb (DISPLAY=$DISPLAY)"
+      # fallback: list all windows as evidence if search by name/class fails
+      DISPLAY=:99 xdotool search --onlyvisible . 2>/dev/null | while read -r wid; do
+        DISPLAY=:99 xdotool getwindowname "$wid" 2>/dev/null
+      done | head -8 > /tmp/windows-list.txt 2>/dev/null || true
+      fail "no window found under Xvfb (DISPLAY=$DISPLAY); windows: $(tr '\n' ',' < /tmp/windows-list.txt 2>/dev/null | head -c 200)"
     fi
     ;;
   windows)
