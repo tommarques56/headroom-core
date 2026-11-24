@@ -6,5 +6,15 @@
     <true/>
     <key>com.apple.security.network.client</key>
     <true/>
+    <!-- Persisted user-selected Files & Folders access: one TCC prompt for the
+         whole signed bundle (app + its helper processes), remembered by macOS.
+         Deliberately NO keychain-access-groups here: on this app a
+         keychain-access-groups entitlement makes the binary die 1s after launch
+         (SIGKILL, no log) under BOTH ad-hoc and Apple Development signatures,
+         verified 2026-11-24. Apple Development signing alone is enough to stop
+         repeated Keychain prompts (macOS binds login-keychain items to the
+         signing identity), so we keep only the file-access entitlement. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
 </dict>
 </plist>
