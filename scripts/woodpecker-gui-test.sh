@@ -44,8 +44,13 @@ if [ -d node_modules/rolldown ]; then
     && node -e "console.log('  rolldown binding OK:', process.platform, process.arch)" 2>/dev/null \
     || echo "  WARN could not restore rolldown native binding ($ROLDDEP)"
 fi
-if npm run tauri build -- --no-bundle >/tmp/tauri-build.log 2>&1; then
-  pass "tauri build"
+# Build in debug: the Windows release profile requires HEADROOM_SIGNED_RUNTIME_*
+# env vars (Azure-signing artifacts) that only the upstream pipeline sets; debug
+# skips that requirement and compiles much faster, which is all we need here —
+# we exercise the real GUI window, not the optimised release binary.
+BIN_PROFILE="${GUI_TEST_PROFILE:-debug}"
+if npm run tauri -- build --$BIN_PROFILE --no-bundle >/tmp/tauri-build.log 2>&1; then
+  pass "tauri build (profile=$BIN_PROFILE)"
 else
   fail "tauri build (see /tmp/tauri-build.log)"
   tail -30 /tmp/tauri-build.log
@@ -53,9 +58,9 @@ else
 fi
 
 case "$OS" in
-  macos)   BIN="$REPO/src-tauri/target/release/bundle/macos/Headroom.app/Contents/MacOS/headroom-desktop";;
-  linux)   BIN="$REPO/src-tauri/target/release/headroom-desktop";;
-  windows) BIN="$REPO/src-tauri/target/release/headroom-desktop.exe";;
+  macos)   BIN="$REPO/src-tauri/target/debug/bundle/macos/Headroom.app/Contents/MacOS/headroom-desktop";;
+  linux)   BIN="$REPO/src-tauri/target/debug/headroom-desktop";;
+  windows) BIN="$REPO/src-tauri/target/debug/headroom-desktop.exe";;
 esac
 [ -f "$BIN" ] || { fail "binary not built: $BIN"; exit "$FAIL"; }
 pass "binary: $BIN"
@@ -92,7 +97,7 @@ fi
 step "launch app (GUI)"
 case "$OS" in
   macos)
-    cp -R "$REPO/src-tauri/target/release/bundle/macos/Headroom.app" "/Applications/Headroom.app" 2>/dev/null || true
+    cp -R "$REPO/src-tauri/target/debug/bundle/macos/Headroom.app" "/Applications/Headroom.app" 2>/dev/null || true
     open -a Headroom >/dev/null 2>&1 || open "$BIN"
     sleep 8
     if osascript -e 'tell application "System Events" to get name of every process' 2>/dev/null | grep -qi "headroom-desktop"; then
