@@ -138,6 +138,16 @@ jobs:
           path: release-assets/*.dmg
           retention-days: 30
 
+      - name: Set up Python 3.12 for the smoke test
+        # The lock (headroom-requirements.lock) pins cp312 wheel hashes.
+        # macos-latest now defaults to a newer python3, which resolves different
+        # ABI wheels (e.g. cffi cp315) that fail the pinned hashes. Pin 3.12 so
+        # the smoke-test venv selects exactly the wheels the lock was made for.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache-dependency-path: src-tauri/python/headroom-requirements.lock
+
       - name: Smoke test — boot the built backend headless and wait for /readyz
         # Exercises the backend that the macOS artifact (the universal .app just
         # bundled) would run, in the same headless way llm-request-test.yml
@@ -153,6 +163,21 @@ jobs:
         run: |
           set -euo pipefail
 
+          # The lock (headroom-requirements.lock) is generated for CPython 3.12.
+          # macos-latest now ships a newer default python3 (3.15), which makes
+          # pip pick ABI wheels (e.g. cffi cp315) that do not match the pinned
+          # cp312 hashes. Pin 3.12 so the venv selects exactly the wheels the
+          # lock was built against.
+          py312="$(command -v python3.12 || true)"
+          if [ -n "$py312" ]; then
+            echo "using system python3.12: $py312"
+          else
+            py312="$(command -v python || true)"
+            echo "using setup-python python: $py312"
+          fi
+          [ -n "$py312" ] || { echo "no Python 3.12 available" >&2; exit 1; }
+          "$py312" --version
+
           # The artifact we ship must exist before we call its engine "tested".
           app="src-tauri/target/universal-apple-darwin/release/bundle/macos/Headroom.app"
           [ -d "$app" ] || { echo "app bundle not found: $app" >&2; exit 1; }
@@ -163,7 +188,7 @@ jobs:
 
           mkdir -p "$HEADROOM_DATA_DIR/headroom/runtime"
           py="$HEADROOM_DATA_DIR/headroom/runtime/venv/bin/python"
-          python3 -m venv "$HEADROOM_DATA_DIR/headroom/runtime/venv"
+          "$py312" -m venv "$HEADROOM_DATA_DIR/headroom/runtime/venv"
           "$py" -m pip install --quiet --only-binary=:all: \
             --find-links https://github.com/gglucass/headroom-desktop/releases/expanded_assets/vendor-wheels-v1 \
             -r src-tauri/python/headroom-requirements.lock
