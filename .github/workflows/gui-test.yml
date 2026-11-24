@@ -35,6 +35,12 @@ jobs:
   gui-macos:
     runs-on: [self-hosted, gui, macOS, ARM64]
     timeout-minutes: 45
+    env:
+      # The LaunchAgent that runs this runner does NOT source shell profiles,
+      # so export the toolchain dirs explicitly (Node + Rust live under $HOME).
+      PATH: /Users/m1/node/bin:/Users/m1/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+      CARGO_HOME: /Users/m1/.cargo
+      RUSTUP_HOME: /Users/m1/.rustup
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,6 +49,7 @@ jobs:
         run: |
           echo "console user: $(stat -f '%Su' /dev/console)"
           pgrep -lf "Dock$" >/dev/null && echo "Dock running (Aqua session OK)" || echo "WARN no Dock"
+          node --version && npm --version && cargo --version
 
       - name: Run real-GUI test
         run: bash ./scripts/woodpecker-gui-test.sh macos
@@ -73,6 +80,10 @@ jobs:
   gui-linux:
     runs-on: [self-hosted, gui, Linux, X64]
     timeout-minutes: 45
+    env:
+      PATH: /home/ubuntu/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      CARGO_HOME: /home/ubuntu/.cargo
+      RUSTUP_HOME: /home/ubuntu/.rustup
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,6 +94,7 @@ jobs:
             && echo "Xvfb :99 OK ($(DISPLAY=:99 xdpyinfo | grep dimensions))" \
             || echo "WARN Xvfb not reachable, driver will retry"
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          node --version && npm --version && cargo --version
 
       - name: Run real-GUI test
         run: bash ./scripts/woodpecker-gui-test.sh linux
@@ -112,7 +124,14 @@ jobs:
   # --------------------------------------------------------------------------
   gui-windows:
     runs-on: [self-hosted, gui, Windows, X64]
-    timeout-minutes: 45
+    timeout-minutes: 60
+    env:
+      # Toolchains are in C:\tools (Git portable + Node) and ~\.cargo (Rust).
+      # The scheduled-task runner session already picked up the machine PATH,
+      # so also add the user-level cargo dir explicitly.
+      PATH: C:\tools\git\cmd;C:\tools\git\bin;C:\tools\node;C:\Users\Administrateur\.cargo\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\
+      CARGO_HOME: C:\Users\Administrateur\.cargo
+      RUSTUP_HOME: C:\Users\Administrateur\.rustup
     defaults:
       run:
         # The runner listener lives in the interactive desktop session; use cmd
@@ -121,6 +140,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fix native rolldown binding (optional dep not pulled by npm ci)
+        shell: bash
+        run: |
+          # The driver script (woodpecker-gui-test.sh) runs npm ci then forces
+          # the win32-x64-msvc rolldown binding; this step only verifies the
+          # toolchain is visible in the runner session.
+          node --version && npm --version && cargo --version
 
       - name: Run real-GUI test
         run: bash ./scripts/woodpecker-gui-test.sh windows

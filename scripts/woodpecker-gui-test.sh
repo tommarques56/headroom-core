@@ -30,6 +30,13 @@ step "repo $REPO @ $(git rev-parse --short HEAD 2>/dev/null)"
 # --- 1. build the app --------------------------------------------------------
 step "build GUI"
 [ -d node_modules ] || npm ci --silent
+# vite 8 uses rolldown; the win32-x64-msvc native binding is an optional
+# dependency occasionally skipped on first install on Windows runners.
+if [ "$OS" = "windows" ] && [ -d node_modules/rolldown ]; then
+  npm install --no-save --no-audit --no-fund @rolldown/binding-win32-x64-msvc >/dev/null 2>&1 \
+    && node -e "require('@rolldown/binding-win32-x64-msvc');console.log('  rolldown binding OK')" 2>/dev/null \
+    || echo "  WARN rolldown binding not restored"
+fi
 if npm run tauri build -- --no-bundle >/tmp/tauri-build.log 2>&1; then
   pass "tauri build"
 else
