@@ -1,6 +1,6 @@
 [package]
 name = "headroom-desktop"
-version = "0.9.66"
+version = "0.9.67"
 description = "Headroom v1 local-first LLM optimization tray app"
 authors = ["Codex"]
 license = "MIT"
@@ -50,7 +50,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = { version = "2.10.0", default-features = false, features = ["rustls-tls"] }
 time = "=0.3.47"
 toml = "0.8"
-tokio = { version = "=1.50.0", features = ["macros", "rt-multi-thread", "process", "fs", "time"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "process", "fs", "time"] }
 uuid = { version = "=1.22.0", features = ["v4", "serde"] }
 
 # Cross-platform, not only the Windows rtk unzip: the MSVC runtime DLL

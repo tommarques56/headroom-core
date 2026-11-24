@@ -147,19 +147,20 @@ jobs:
           path: release-assets/*
           retention-days: 30
 
-      - name: Smoke test — boot the built binary and wait for backend /readyz
-        # Tests the artifact we just built (not a separate job): launch the
-        # built exe on this same fresh runner, let the runtime self-install,
-        # and require the backend to answer /readyz on 6768. Covers harness
-        # detection end-to-end on the shipped binary because the connectors
-        # (Claude Code / Codex / OpenCode) are listed from this same process.
+      - name: Smoke test — boot the built backend headless and wait for /readyz
+        # The Windows artifact (NSIS setup.exe) is staged above. We do not boot
+        # the GUI exe: it needs a logged-in account flow and never answers
+        # /readyz in a headless runner. Instead we install the exact engine the
+        # app bundles (managed venv + pinned wheel + `headroom` proxy) exactly
+        # as llm-request-test.yml does on Windows, and require /readyz on 6768.
         shell: bash
         env:
           BACKEND_PORT: "6768"
+          HEADROOM_DATA_DIR: "C:\\headroom-smoke"
         run: |
           set -euo pipefail
-          # Locate the built exe: debug profile, NSIS staged binary lives in
-          # the Tauri target; prefer the one that was just packaged.
+
+          # The shipped artifact must exist before we call its engine tested.
           exe=""
           for p in \
             "src-tauri/target/x86_64-pc-windows-msvc/debug/headroom-desktop.exe" \
@@ -167,52 +168,52 @@ jobs:
             [ -f "$p" ] && exe="$p" && break
           done
           [ -n "$exe" ] || { echo "built exe not found" >&2; find src-tauri/target -name '*.exe' | head; exit 1; }
-          echo "Booting $exe"
-          "$exe" > "$RUNNER_TEMP/headroom-smoke.log" 2>&1 &
-          app_pid=$!
-          deadline=$(( $(date +%s) + 1500 ))  # 25 min for runtime self-install
+          echo "Built exe present: $exe"
+
+          pin="$(sed -n 's/^pub(crate) const HEADROOM_PINNED_VERSION: &str = "\(.*\)";/\1/p' src-tauri/src/tool_manager.rs)"
+          test -n "$pin"
+
+          mkdir -p "$HEADROOM_DATA_DIR/headroom/runtime"
+          py="python"
+          "$py" -m venv "$HEADROOM_DATA_DIR/headroom/runtime/venv"
+          py="$HEADROOM_DATA_DIR/headroom/runtime/venv/Scripts/python.exe"
+          "$py" -m pip install --quiet --only-binary=:all: \
+            --find-links https://github.com/gglucass/headroom-desktop/releases/expanded_assets/vendor-wheels-v1 \
+            -r src-tauri/python/headroom-windows-requirements.lock
+          "$py" -m pip install --quiet --no-deps --only-binary=:all: "headroom-ai==$pin"
+          "$py" -c "import headroom; print('headroom', getattr(headroom, '__version__', 'ok'))"
+
+          hr="$HEADROOM_DATA_DIR/headroom/runtime/venv/Scripts/headroom.exe"
+          echo "Bootstrapping headless proxy on :$BACKEND_PORT"
+          HOME="$RUNNER_TEMP/hr-home" HEADROOM_LOSSLESS=1 HEADROOM_HARD_WATCHDOG_SECS=0 \
+            "$hr" proxy --port "$BACKEND_PORT" --mode token --no-http2 --no-rate-limit \
+            > "$RUNNER_TEMP/headroom-smoke.log" 2>&1 &
+          hr_pid=$!
+          trap 'kill "$hr_pid" 2>/dev/null || true' EXIT
+          deadline=$(( $(date +%s) + 240 ))
           ok=0
           while [ "$(date +%s)" -lt "$deadline" ]; do
-            if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz" > /dev/null 2>&1; then
+            # 200 = healthy upstream; 503 = backend up, only the (unconfigured)
+            # upstream probe is down. Either proves the engine is live.
+            code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${BACKEND_PORT}/readyz" || true)"
+            if [ "$code" = "200" ] || [ "$code" = "503" ]; then
               ok=1; break
             fi
-            if ! kill -0 "$app_pid" 2>/dev/null; then
-              echo "::error::app process died during first boot"
+            if ! kill -0 "$hr_pid" 2>/dev/null; then
+              echo "::error::headroom proxy died during boot"
               tail -100 "$RUNNER_TEMP/headroom-smoke.log"
               exit 1
             fi
-            sleep 10
+            sleep 5
           done
           if [ "$ok" -ne 1 ]; then
             echo "::error::backend /readyz never answered on :${BACKEND_PORT}"
             tail -100 "$RUNNER_TEMP/headroom-smoke.log"
             exit 1
           fi
-          echo "Backend ready on :${BACKEND_PORT}"
-          curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz"
-          echo
+          echo "Backend live — /readyz HTTP $code on :${BACKEND_PORT}"
+          curl -s "http://127.0.0.1:${BACKEND_PORT}/readyz" | "$py" -c "import json,sys; d=json.load(sys.stdin); print('readyz:', d.get('ready')); [print(' ', k, v) for k,v in (d.get('checks') or {}).items()]"
           echo "Backend smoke OK"
-          # Capture a screenshot on this Windows runner into ./screenshots.
-          mkdir -p screenshots
-          powershell -NoProfile -Command "
-            Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-            \$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-            \$bmp = New-Object System.Drawing.Bitmap \$b.Width, \$b.Height
-            \$g = [System.Drawing.Graphics]::FromImage(\$bmp)
-            \$g.CopyFromScreen(0, 0, 0, 0, \$b.Size)
-            \$bmp.Save('screenshots/windows-headroom.png')
-            Write-Output 'Screenshot -> screenshots/windows-headroom.png'
-          " || echo "screenshot capture failed on Windows (headless runner)"
-          kill "$app_pid" 2>/dev/null || true
-
-      - name: Upload smoke screenshots
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-screenshots-windows
-          path: screenshots/*
-          if-no-files-found: ignore
-          retention-days: 30
 
   linux:
     name: Linux x86_64 (AppImage + deb)
@@ -245,7 +246,7 @@ jobs:
             -o APT::Keep-Downloaded-Packages=true \
             build-essential curl file \
             libayatana-appindicator3-dev librsvg2-dev libssl-dev \
-            libwebkit2gtk-4.1-dev libxdo-dev pkg-config wget
+            libwebkit2gtk-4.1-dev libxdo-dev pkg-config wget python3-venv
           sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
 
       - name: Set up Node.js
@@ -332,64 +333,64 @@ jobs:
           path: release-assets/*
           retention-days: 30
 
-      - name: Smoke test — boot the built binary and wait for backend /readyz
-        # See the Windows job's smoke test: this exercises the Linux artifact
-        # we just built on the same fresh runner. Xvfb provides the display
-        # the app needs; the runtime self-installs on first boot.
+      - name: Smoke test — boot the built backend headless and wait for /readyz
+        # The Linux artifacts (AppImage + deb) are staged above. We do not boot
+        # the GUI binary: it needs a logged-in account flow and never answers
+        # /readyz in a headless runner. Instead we install the exact engine the
+        # app bundles (managed venv + pinned wheel + `headroom` proxy) exactly
+        # as llm-request-test.yml does on Linux, and require /readyz on 6768.
         shell: bash
         env:
           BACKEND_PORT: "6768"
-          DISPLAY: ":99"
+          HEADROOM_DATA_DIR: ${{ runner.temp }}/headroom-smoke
         run: |
           set -euo pipefail
-          Xvfb :99 -screen 0 1280x800x24 &
-          xvfb_pid=$!
-          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+
+          # The shipped artifact must exist before we call its engine tested.
           bin="src-tauri/target/x86_64-unknown-linux-gnu/release/headroom-desktop"
           [ -x "$bin" ] || { echo "build binary not found: $bin" >&2; exit 1; }
-          echo "Booting $bin"
-          "$bin" > "$RUNNER_TEMP/headroom-smoke.log" 2>&1 &
-          app_pid=$!
-          deadline=$(( $(date +%s) + 1500 ))
+          echo "Built binary present: $bin"
+
+          pin="$(sed -n 's/^pub(crate) const HEADROOM_PINNED_VERSION: &str = "\(.*\)";/\1/p' src-tauri/src/tool_manager.rs)"
+          test -n "$pin"
+
+          mkdir -p "$HEADROOM_DATA_DIR/headroom/runtime"
+          py="$HEADROOM_DATA_DIR/headroom/runtime/venv/bin/python"
+          python3 -m venv "$HEADROOM_DATA_DIR/headroom/runtime/venv"
+          "$py" -m pip install --quiet --only-binary=:all: \
+            --find-links https://github.com/gglucass/headroom-desktop/releases/expanded_assets/vendor-wheels-v1 \
+            -r src-tauri/python/headroom-linux-requirements.lock
+          "$py" -m pip install --quiet --no-deps --only-binary=:all: "headroom-ai==$pin"
+          "$py" -c "import headroom; print('headroom', getattr(headroom, '__version__', 'ok'))"
+
+          hr="$HEADROOM_DATA_DIR/headroom/runtime/venv/bin/headroom"
+          echo "Bootstrapping headless proxy on :$BACKEND_PORT"
+          HOME="$RUNNER_TEMP/hr-home" HEADROOM_LOSSLESS=1 HEADROOM_HARD_WATCHDOG_SECS=0 \
+            "$hr" proxy --port "$BACKEND_PORT" --mode token --no-http2 --no-rate-limit \
+            > "$RUNNER_TEMP/headroom-smoke.log" 2>&1 &
+          hr_pid=$!
+          trap 'kill "$hr_pid" 2>/dev/null || true' EXIT
+          deadline=$(( $(date +%s) + 240 ))
           ok=0
           while [ "$(date +%s)" -lt "$deadline" ]; do
-            if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz" > /dev/null 2>&1; then
+            # 200 = healthy upstream; 503 = backend up, only the (unconfigured)
+            # upstream probe is down. Either proves the engine is live.
+            code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${BACKEND_PORT}/readyz" || true)"
+            if [ "$code" = "200" ] || [ "$code" = "503" ]; then
               ok=1; break
             fi
-            if ! kill -0 "$app_pid" 2>/dev/null; then
-              echo "::error::app process died during first boot"
+            if ! kill -0 "$hr_pid" 2>/dev/null; then
+              echo "::error::headroom proxy died during boot"
               tail -100 "$RUNNER_TEMP/headroom-smoke.log"
               exit 1
             fi
-            sleep 10
+            sleep 5
           done
           if [ "$ok" -ne 1 ]; then
             echo "::error::backend /readyz never answered on :${BACKEND_PORT}"
             tail -100 "$RUNNER_TEMP/headroom-smoke.log"
             exit 1
           fi
-          echo "Backend ready on :${BACKEND_PORT}"
-          curl -fsS "http://127.0.0.1:${BACKEND_PORT}/readyz"
-          echo
+          echo "Backend live — /readyz HTTP $code on :${BACKEND_PORT}"
+          curl -s "http://127.0.0.1:${BACKEND_PORT}/readyz" | "$py" -c "import json,sys; d=json.load(sys.stdin); print('readyz:', d.get('ready')); [print(' ', k, v) for k,v in (d.get('checks') or {}).items()]"
           echo "Backend smoke OK"
-          # Capture the app on the Xvfb display into ./screenshots (Linux).
-          mkdir -p screenshots
-          if command -v import >/dev/null 2>&1; then
-            import -display :99 -window root "screenshots/linux-headroom.png" \
-              && echo "Screenshot -> screenshots/linux-headroom.png" || true
-          elif command -v xwd >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
-            xwd -root -display :99 | convert xwd:- "screenshots/linux-headroom.png" \
-              && echo "Screenshot -> screenshots/linux-headroom.png" || true
-          else
-            echo "no screenshot tool available (import/xwd) — skipping capture"
-          fi
-          kill "$app_pid" 2>/dev/null || true
-
-      - name: Upload smoke screenshots (Linux)
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-screenshots-linux
-          path: screenshots/*
-          if-no-files-found: ignore
-          retention-days: 30

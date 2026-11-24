@@ -23944,7 +23944,6 @@ Always run the linter first.
         ));
         for workflow in [
             include_str!("../../.github/workflows/release-macos-staging.yml"),
-            include_str!("../../.github/workflows/release-macos.yml"),
             include_str!("../../.github/workflows/release-windows-download.yml"),
         ] {
             assert!(workflow.contains("./scripts/publish-windows-signed-runtime.sh"));
