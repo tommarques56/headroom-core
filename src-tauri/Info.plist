@@ -2,7 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>LSUIElement</key>
-  <true/>
+  <!-- LSUIElement deliberately ABSENT so Headroom shows a Dock icon and
+       keeps its menu-bar tray (requested behavior 0.9.69: "icône en haut
+       et icône dock"). The Rust side uses ActivationPolicy::Regular to match. -->
 </dict>
 </plist>

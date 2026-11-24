@@ -8608,13 +8608,15 @@ pub fn run() {
             }
             #[cfg(target_os = "macos")]
             {
-                // Accessory policy makes this a menu-bar-only app (no dock icon).
-                // Do NOT also call set_dock_visibility(false): it uses Carbon's
+                // Regular policy shows a Dock icon AND keeps the menu-bar tray,
+                // per user request (0.9.69: "icône en haut et icône dock").
+                // We deliberately do NOT read/discard the Info.plist LSUIElement
+                // here; it is removed from the bundle so the Dock icon shows.
+                // Do not call set_dock_visibility(false): it uses Carbon's
                 // TransformProcessType, which Apple warns must not be mixed with
                 // setActivationPolicy on the same process and intermittently
-                // registers a dock icon. LSUIElement=true in Info.plist already
-                // covers the packaged bundle.
-                app.set_activation_policy(ActivationPolicy::Accessory);
+                // registers a dock icon.
+                app.set_activation_policy(ActivationPolicy::Regular);
 
                 // The tray dropdown must open on whatever Space/desktop the
                 // user is currently on. A plain NSWindow stays bound to the
