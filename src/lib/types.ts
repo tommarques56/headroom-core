@@ -99,6 +99,11 @@ export interface DailySavingsPoint {
   // holdout scored nothing.
   outputAbTokensSaved?: number | null;
   outputAbBaselineTokens?: number | null;
+  /** Per-sender token breakdown for the day (ledger `client` field: claude-code,
+   * codex, opencode, cursor-vscode, chatgpt, ...), all sources. Scaled so the
+   * values sum to `estimatedTokensSaved`. Absent when the ledger has no rows
+   * for the day. */
+  bySource?: Record<string, number>;
 }
 
 // Counterfactual output-token reduction from the proxy's output shaper.

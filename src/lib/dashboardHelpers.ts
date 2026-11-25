@@ -42,6 +42,9 @@ export interface SavingsChartDatum {
   // Per-provider attribution, only populated for hourly buckets (day view).
   // Undefined for monthly buckets, which have no provider dimension.
   byProvider?: ProviderSavingsPoint[];
+  // Per-sender breakdown for the bucket (ledger `client` field), scaled so the
+  // values sum to `estimatedTokensSaved`. Absent when the ledger has no rows.
+  bySource?: Record<string, number>;
 }
 
 export function currencyExact(value: number) {
@@ -465,8 +468,41 @@ export function buildMonthlySavingsChartData(data: DailySavingsPoint[]): Savings
     totalCostBeforeOptimization:
       point.actualCostUsd + point.estimatedSavingsUsd + (point.toolSchemaSavingsUsd ?? 0),
     totalTokensBeforeOptimization:
-      point.totalTokensSent + point.estimatedTokensSaved + (point.toolSchemaTokensSaved ?? 0)
+      point.totalTokensSent + point.estimatedTokensSaved + (point.toolSchemaTokensSaved ?? 0),
+    bySource: point.bySource,
   }));
+}
+
+/** Key prefix for per-sender stacked-bar data keys on `SavingsChartDatum`. */
+export const SOURCE_SEGMENT_KEY_PREFIX = "sourceSegment:";
+
+/** Flatten a bucket list's per-source breakdown into a per-datum column map:
+ *  `{ [day]: { [sourceKey]: tokens } }` plus the union of all source keys.
+ *  Senders missing on a given day are padded with 0 so stacked bars line up. */
+export function flattenSourceSegments(
+  data: SavingsChartDatum[]
+): { columns: Record<string, Record<string, number>>; sources: string[] } {
+  const columns: Record<string, Record<string, number>> = {};
+  const sourceSet = new Set<string>();
+  for (const point of data) {
+    if (!point.bySource) continue;
+    const col: Record<string, number> = {};
+    for (const [client, tokens] of Object.entries(point.bySource)) {
+      const key = normalizeSourceSegmentKey(client);
+      col[key] = tokens;
+      sourceSet.add(key);
+    }
+    columns[point.bucketKey] = col;
+  }
+  return {
+    columns,
+    sources: Array.from(sourceSet).sort((a, b) => (a < b ? -1 : 1)),
+  };
+}
+
+/** Normalize a ledger client label into a stable stacked-bar column key. */
+function normalizeSourceSegmentKey(client: string): string {
+  return client.trim().toLowerCase().replace(/\W+/g, "-");
 }
 
 export interface ProviderSavingsDisplay {

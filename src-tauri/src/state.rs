@@ -2863,13 +2863,22 @@ impl AppState {
             // buckets -- rises with them, exactly like the other input layers.
             let ledger = crate::ledger_savings::aggregated();
             if ledger.total_tokens_saved > 0 {
+                // Per-sender breakdown: the history chart's per-sender detail
+                // comes straight from the ledger's actual `client` attribution
+                // (all sources: proxy + MCP + CLI). These are REAL tokens per
+                // sender, not a ratio of the headline total — a day the ledger
+                // does not fully cover simply shows the part it knows.
                 for point in daily_savings.iter_mut() {
-                    let Some(delta) = ledger.by_utc_day.get(&point.date) else {
-                        continue;
-                    };
-                    if *delta > 0 {
-                        point.estimated_tokens_saved =
-                            point.estimated_tokens_saved.saturating_add(*delta);
+                    if let Some(sources) = ledger.by_source_day.get(&point.date) {
+                        if !sources.is_empty() {
+                            point.by_source = Some(sources.clone());
+                        }
+                    }
+                    if let Some(delta) = ledger.by_utc_day.get(&point.date) {
+                        if *delta > 0 {
+                            point.estimated_tokens_saved =
+                                point.estimated_tokens_saved.saturating_add(*delta);
+                        }
                     }
                 }
                 // A ledger day with no bucket yet (e.g. MCP ran while the app
@@ -2900,6 +2909,8 @@ impl AppState {
                             output_ab_tokens_saved: None,
                             output_ab_baseline_tokens: None,
                             utc_keyed: true,
+                            // Breakdown for the new day: the ledger's own rows.
+                            by_source: ledger.by_source_day.get(day).cloned(),
                         });
                     }
                 }
@@ -6054,6 +6065,7 @@ impl SavingsTracker {
                 output_ab_tokens_saved: None,
                 output_ab_baseline_tokens: None,
                 utc_keyed: bucket.utc_keyed,
+                by_source: None,
             })
             .collect()
     }
@@ -7470,6 +7482,7 @@ impl HeadroomSavingsHistoryResponse {
                 output_ab_tokens_saved: None,
                 output_ab_baseline_tokens: None,
                 utc_keyed: true,
+                by_source: None,
             })
             .collect()
     }
@@ -14605,6 +14618,86 @@ mod tests {
         fs::remove_dir_all(base_dir).expect("remove temp dir");
     }
 
+    #[test]
+    fn ledger_by_source_overlay_scales_segments_to_each_days_total() {
+        // A ledger with non-proxy rows (MCP etc.) plus proxy rows must show up
+        // as a per-sender breakdown on the daily buckets, scaled so the
+        // segment values sum exactly to the bucket's `estimated_tokens_saved`.
+        let base_dir = temp_test_dir("headroom-by-source-overlay");
+
+        struct HomeSwap {
+            prev: Option<std::ffi::OsString>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for HomeSwap {
+            fn drop(&mut self) {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+        let fake_home = temp_test_dir("headroom-by-source-home");
+        let ledger_dir = fake_home.join(".headroom");
+        fs::create_dir_all(&ledger_dir).expect("create ledger dir");
+        fs::write(
+            ledger_dir.join("savings_events.jsonl"),
+            concat!(
+                "{\"ts\":\"2026-11-25T10:00:00+00:00\",\"saved\":300,\"source\":\"mcp\",\"pid\":1,\"client\":\"cursor-vscode\"}\n",
+                "{\"ts\":\"2026-11-25T11:00:00+00:00\",\"saved\":700,\"source\":\"proxy\",\"pid\":2,\"client\":\"claude-code\"}\n",
+                "{\"ts\":\"2026-11-24T08:00:00+00:00\",\"saved\":100,\"source\":\"cli\",\"pid\":3,\"client\":\"opencode\"}\n",
+            ),
+        )
+        .expect("write ledger");
+        let _home = HomeSwap {
+            prev: std::env::var_os("HOME"),
+            _lock: crate::test_env_lock::lock_home(),
+        };
+        std::env::set_var("HOME", &fake_home);
+        // Clear the ledger module's TTL cache so it re-reads the fake home.
+        crate::ledger_savings::clear_cache_for_tests();
+
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        // Silence live /stats on a dev machine: only the ledger may seed data.
+        *state.cached_headroom_stats.lock() =
+            Some((None, Instant::now(), Duration::from_secs(60)));
+        *state.cached_headroom_history.lock() =
+            Some((None, Instant::now(), Duration::from_secs(30)));
+
+        let dashboard = state.dashboard();
+        // The 25th: non-proxy delta (300, MCP cursor) is added to the bucket's
+        // own total; the per-sender breakdown is the ledger's REAL attribution
+        // (all sources incl. proxy), not a ratio of the headline total.
+        let day = dashboard
+            .daily_savings
+            .iter()
+            .find(|p| p.date == "2026-11-25")
+            .expect("day 25 present");
+        let by_source = day
+            .by_source
+            .as_ref()
+            .expect("day 25 carries a per-sender breakdown");
+        // Real ledger values per sender, all sources.
+        assert_eq!(by_source.get("cursor-vscode"), Some(&300), "MCP cursor portion");
+        assert_eq!(by_source.get("claude-code"), Some(&700), "proxy claude-code portion");
+        // The non-proxy delta was still added to the headline total.
+        assert_eq!(day.estimated_tokens_saved, 300);
+        // The 24th: separate day, separate sender (CLI non-proxy).
+        let day24 = dashboard
+            .daily_savings
+            .iter()
+            .find(|p| p.date == "2026-11-24")
+            .expect("day 24 present");
+        let bs24 = day24
+            .by_source
+            .as_ref()
+            .expect("day 24 carries a per-sender breakdown");
+        assert_eq!(bs24.get("opencode"), Some(&100));
+
+        fs::remove_dir_all(base_dir).expect("remove temp dir");
+        let _ = fs::remove_dir_all(fake_home);
+    }
+
     fn pricing_status_with_optimization(allowed: bool) -> crate::models::HeadroomPricingStatus {
         use crate::models::{
             ClaudeAccountProfile, ClaudeAuthMethod, ClaudePlanTier, HeadroomPricingStatus,
@@ -18653,6 +18746,7 @@ mod tests {
             output_ab_tokens_saved: None,
             output_ab_baseline_tokens: None,
             utc_keyed: false,
+                by_source: None,
         }
     }
 
@@ -19012,6 +19106,7 @@ mod tests {
             output_ab_tokens_saved: None,
             output_ab_baseline_tokens: None,
             utc_keyed: false,
+                by_source: None,
         }];
         let result = merge_daily_savings(tracker, history, "2026-04-20", "2026-04-30");
         assert_eq!(result.len(), 1);

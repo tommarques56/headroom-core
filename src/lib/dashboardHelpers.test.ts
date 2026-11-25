@@ -15,6 +15,7 @@ import {
   outputReductionForWindow,
   outputSavingsNote,
   compactNumber,
+  flattenSourceSegments,
   connectorDashboardStatus,
   connectorGateBlocksEnable,
   connectorGateMessage,
@@ -1026,5 +1027,37 @@ describe("calloutBannerFor", () => {
         unrouted
       })
     ).toEqual({ tone: "disabled", title: "Your Headroom trial ended." });
+  });
+
+  describe("flattenSourceSegments", () => {
+    it("pads days a sender contributed nothing so stacked bars align", () => {
+      const data = [
+        {
+          bucketKey: "2026-11-25",
+          bySource: { "cursor-vscode": 371, "claude-code": 5000 },
+        },
+        {
+          bucketKey: "2026-11-24",
+          bySource: { "claude-code": 100 },
+        },
+      ];
+      const { columns, sources } = flattenSourceSegments(data as never);
+      expect(sources.sort()).toEqual(["claude-code", "cursor-vscode"]);
+      expect(columns["2026-11-25"]).toEqual({
+        "claude-code": 5000,
+        "cursor-vscode": 371,
+      });
+      expect(columns["2026-11-24"]).toEqual({
+        "claude-code": 100,
+      });
+    });
+
+    it("handles data with no bySource (no columns, no sources)", () => {
+      const { columns, sources } = flattenSourceSegments([
+        { bucketKey: "2026-11-25" },
+      ] as never);
+      expect(sources).toEqual([]);
+      expect(columns).toEqual({});
+    });
   });
 });

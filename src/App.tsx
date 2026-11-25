@@ -174,6 +174,8 @@ import {
   splitIssue,
   startOfDay,
   startOfMonth,
+  SOURCE_SEGMENT_KEY_PREFIX,
+  flattenSourceSegments,
   type SavingsChartDatum
 } from "./lib/dashboardHelpers";
 import {
@@ -664,6 +666,62 @@ const DESKTOP_ACTIVATION_MAX_ATTEMPTS = 5;
 const DESKTOP_ACTIVATION_RETRY_BASE_MS = 30_000;
 const DESKTOP_ACTIVATION_RETRY_MAX_MS = 5 * 60 * 1000;
 
+// Sender legend for the per-source history chart segments. Keyed by the
+// ledger's `client` field (normalized: lowercased, "-" → " "). Senders not
+// listed here fall into "Autres" (Others). Palette is CVD-safe gold-ramp
+// neighbors apart from the input/output chip colors, so a stacked segment
+// never reads as one of the top-level savings bars.
+const SENDER_META: Record<string, { label: string; color: string }> = {
+  "claude code": { label: "Claude Code", color: "#c26bd6" },
+  claude: { label: "Claude Desktop", color: "#d97742" },
+  codex: { label: "Codex", color: "#3b82f6" },
+  "chatgpt desktop": { label: "ChatGPT Desktop", color: "#0d9488" },
+  cursor: { label: "Cursor", color: "#c2650a" },
+  "cursor-vscode": { label: "Cursor (VS Code)", color: "#c2650a" },
+  opencode: { label: "OpenCode", color: "#06b6d4" },
+  herme: { label: "Hermes", color: "#8b5cf6" },
+  unknown: { label: "Autres", color: "#9ca3af" },
+};
+const SENDER_FALLBACK_COLOR = "#9ca3af";
+const SENDER_MAX_SEGMENTS = 8;
+
+function normalizeSenderKey(client: string): string {
+  return client.trim().toLowerCase().replace(/-/g, " ");
+}
+
+function senderMeta(client: string): { label: string; color: string } {
+  const meta = SENDER_META[normalizeSenderKey(client)];
+  return meta ?? { label: client, color: SENDER_FALLBACK_COLOR };
+}
+
+/** Fold a day's per-source breakdown into <= SENDER_MAX_SEGMENTS rows ready
+ * for stacked bars. Rare senders fold into a single "Autres" row. */
+function foldSourceBreakdown(bySource: Record<string, number>): Array<{
+  key: string;
+  label: string;
+  color: string;
+  tokens: number;
+}> {
+  const rows = Object.entries(bySource).map(([client, tokens]) => ({
+    key: client,
+    tokens,
+    ...senderMeta(client),
+  }));
+  rows.sort((a, b) => b.tokens - a.tokens);
+  if (rows.length <= SENDER_MAX_SEGMENTS) return rows;
+  const kept = rows.slice(0, SENDER_MAX_SEGMENTS - 1);
+  const othersTokens = rows
+    .slice(SENDER_MAX_SEGMENTS - 1)
+    .reduce((sum, row) => sum + row.tokens, 0);
+  kept.push({
+    key: "others",
+    label: "Autres",
+    color: SENDER_FALLBACK_COLOR,
+    tokens: othersTokens,
+  });
+  return kept;
+}
+
 function SavingsChartTooltip({
   active,
   payload,
@@ -753,13 +811,37 @@ function SavingsChartTooltip({
         ) : (
           <div className="savings-chart__tooltip-group">
             <span className="savings-chart__tooltip-label">Tokens</span>
-            <span className="savings-chart__tooltip-item">
-              <i
-                aria-hidden="true"
-                className="savings-chart__tooltip-dot savings-chart__tooltip-dot--saved-tokens"
-              />
-              Input saved {compactNumber(point.estimatedTokensSaved)} tokens
-            </span>
+            {point.bySource && chartMode === "tokens" ? (
+              // Per-sender breakdown from the ledger: list who saved what,
+              // each with its segment color, plus the bucket total.
+              <>
+                {foldSourceBreakdown(point.bySource).map((sender) => (
+                  <span className="savings-chart__tooltip-item" key={sender.key}>
+                    <i
+                      aria-hidden="true"
+                      className="savings-chart__tooltip-dot savings-chart__tooltip-dot--custom"
+                      style={{ background: sender.color }}
+                    />
+                    {sender.label} · {compactNumber(sender.tokens)} tokens
+                  </span>
+                ))}
+                <span className="savings-chart__tooltip-item">
+                  <i
+                    aria-hidden="true"
+                    className="savings-chart__tooltip-dot savings-chart__tooltip-dot--saved-tokens"
+                  />
+                  Total saved {compactNumber(point.estimatedTokensSaved)} tokens
+                </span>
+              </>
+            ) : (
+              <span className="savings-chart__tooltip-item">
+                <i
+                  aria-hidden="true"
+                  className="savings-chart__tooltip-dot savings-chart__tooltip-dot--saved-tokens"
+                />
+                Input saved {compactNumber(point.estimatedTokensSaved)} tokens
+              </span>
+            )}
             <span className="savings-chart__tooltip-item">
               <i
                 aria-hidden="true"
@@ -1064,6 +1146,25 @@ function DailySavingsChart({
   const monthlyData = buildMonthlySavingsChartData(monthlyWindow);
   const hourlyChartData = buildHourlySavingsChartData(hourlyWindow);
   const chartData = view === "month" ? monthlyData : hourlyChartData;
+  // Per-sender segments for the stacked bars: flatten the ledger breakdown
+  // into one column per sender, padded with 0 on days that sender contributed
+  // nothing, so the bars align across the chart.
+  const sourceColumns = flattenSourceSegments(view === "month" ? monthlyData : hourlyChartData);
+  // The chart renders one <Bar dataKey={sourceSegment:<sender>}> per sender;
+  // each datum must carry its own column value for every sender (0 when that
+  // sender contributed nothing that bucket).
+  const chartDataWithSources =
+    sourceColumns.sources.length > 0
+      ? chartData.map((datum) => {
+          const col = sourceColumns.columns[datum.bucketKey];
+          if (!col) return datum;
+          const extra: Record<string, number> = {};
+          for (const key of sourceColumns.sources) {
+            extra[`${SOURCE_SEGMENT_KEY_PREFIX}${key}`] = col[key] ?? 0;
+          }
+          return { ...datum, ...extra };
+        })
+      : chartData;
   // Canonical rate under the headline: input compression on the NEW-INPUT
   // basis for the visible window -- saved tokens vs the input that newly
   // entered context (uncached + cache writes, locally sampled; see
@@ -1373,7 +1474,7 @@ function DailySavingsChart({
             <BarChart
               barCategoryGap="5%"
               barGap={1}
-              data={chartData}
+              data={chartDataWithSources}
               // Clears the overlay: total + label + the chip row added in 0.7.9
               // measure ~72px from the canvas top, so this is that plus a few
               // px of breathing room -- not slack to be reclaimed twice.
@@ -1472,14 +1573,41 @@ function DailySavingsChart({
                     stackId="tokens"
                     yAxisId="tokens"
                   />
-                  <Bar
-                    dataKey="estimatedTokensSaved"
-                    fill="url(#savingsTokensGradient)"
-                    maxBarSize={16}
-                    radius={[1, 1, 0, 0]}
-                    stackId="tokens"
-                    yAxisId="tokens"
-                  />
+                  {sourceColumns.sources.length > 0 ? (
+                    // Per-sender segments stacked under the output segment.
+                    // Each bar reads its own `sourceSegment:<sender>` column,
+                    // colored by the sender palette (folded into the chart
+                    // data as 0 when that sender contributed nothing that day).
+                    sourceColumns.sources.map((key, index) => {
+                      const meta = senderMeta(key);
+                      return (
+                        <Bar
+                          key={key}
+                          dataKey={`${SOURCE_SEGMENT_KEY_PREFIX}${key}`}
+                          fill={meta.color}
+                          maxBarSize={16}
+                          // Round only the top-most segment; lower ones butt
+                          // against the next sender flat.
+                          radius={
+                            index === sourceColumns.sources.length - 1
+                              ? [1, 1, 0, 0]
+                              : [0, 0, 0, 0]
+                          }
+                          stackId="tokens"
+                          yAxisId="tokens"
+                        />
+                      );
+                    })
+                  ) : (
+                    <Bar
+                      dataKey="estimatedTokensSaved"
+                      fill="url(#savingsTokensGradient)"
+                      maxBarSize={16}
+                      radius={[1, 1, 0, 0]}
+                      stackId="tokens"
+                      yAxisId="tokens"
+                    />
+                  )}
                   <Bar
                     dataKey="outputTokensSaved"
                     fill="url(#outputTokensGradient)"

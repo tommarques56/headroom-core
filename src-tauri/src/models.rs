@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -291,6 +293,13 @@ pub struct DailySavingsPoint {
     /// Decides whether the reported day ends at UTC or local midnight.
     #[serde(default)]
     pub utc_keyed: bool,
+    /// Per-sender token breakdown for the day, from the durable ledger
+    /// (`client` field: claude-code, codex, opencode, cursor-vscode, ...).
+    /// All sources (proxy + MCP + CLI). None when the ledger has no rows for
+    /// the day. Proportions are rescaled so the segments sum to
+    /// `estimated_tokens_saved` (see the dashboard overlay).
+    #[serde(default)]
+    pub by_source: Option<BTreeMap<String, u64>>,
 }
 
 /// Per-provider (anthropic / openai / unknown) attribution for a single hourly
@@ -1931,5 +1940,53 @@ mod tests {
         assert_eq!(cohort.status, "active");
         assert_eq!(cohort.capacity, None);
         assert_eq!(cohort.spots_left, None);
+    }
+
+    #[test]
+    fn daily_point_by_source_serializes_as_camel_case_by_source() {
+        // The per-sender breakdown must reach the webview as `bySource` (the
+        // frontend types and the chart look for that key).
+        let point = DailySavingsPoint {
+            date: "2026-11-25".to_string(),
+            estimated_savings_usd: 1.25,
+            estimated_tokens_saved: 1000,
+            actual_cost_usd: 3.0,
+            total_tokens_sent: 100_000,
+            new_input_tokens: 30_000,
+            output_savings_usd: 0.0,
+            output_tokens_saved: 0,
+            tool_schema_savings_usd: 0.0,
+            tool_schema_tokens_saved: 0,
+            cache_read_tokens: None,
+            cache_savings_usd: None,
+            cache_read_cost_usd: None,
+            output_sampled_tokens_saved: None,
+            output_baseline_tokens: None,
+            output_ab_tokens_saved: None,
+            output_ab_baseline_tokens: None,
+            utc_keyed: true,
+            by_source: Some(BTreeMap::from([
+                ("claude-code".to_string(), 700u64),
+                ("cursor-vscode".to_string(), 300u64),
+            ])),
+        };
+        let value = serde_json::to_value(&point).unwrap();
+        assert_eq!(value["date"], "2026-11-25");
+        // camelCase field exposed to the webview.
+        assert!(value.get("bySource").is_some(), "expected bySource in JSON");
+        assert_eq!(value["bySource"]["claude-code"], 700);
+        assert_eq!(value["bySource"]["cursor-vscode"], 300);
+        assert_eq!(value["estimatedTokensSaved"], 1000);
+        // Absent by_source stays absent (serde skips None).
+        let point2 = serde_json::from_value::<DailySavingsPoint>(json!({
+            "date": "2026-11-24",
+            "estimatedSavingsUsd": 0.0,
+            "estimatedTokensSaved": 0,
+            "actualCostUsd": 0.0,
+            "totalTokensSent": 0,
+            "utcKeyed": false,
+        }))
+        .unwrap();
+        assert!(point2.by_source.is_none());
     }
 }

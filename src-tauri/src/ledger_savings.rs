@@ -38,11 +38,15 @@ struct DayAccumulator {
     tokens_saved: u64,
 }
 
-/// Aggregated non-proxy savings from the ledger, bucketed by UTC day.
+/// Aggregated savings from the ledger, bucketed by UTC day and by sender.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LedgerSavings {
     /// UTC day key (`YYYY-MM-DD`) → tokens saved by non-proxy sources.
     pub by_utc_day: BTreeMap<String, u64>,
+    /// UTC day key → sender (`client` field) → tokens saved. Covers every
+    /// source (proxy + MCP + CLI) so the history chart can show who saved
+    /// what; senders are the raw `client` labels from the events.
+    pub by_source_day: BTreeMap<String, BTreeMap<String, u64>>,
     /// Sum across every day in `by_utc_day`.
     pub total_tokens_saved: u64,
 }
@@ -75,6 +79,7 @@ fn read_ledger(path: &PathBuf) -> LedgerRead {
     };
     let reader = BufReader::new(file);
     let mut acc: BTreeMap<String, DayAccumulator> = BTreeMap::new();
+    let mut by_source_day: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
     let mut total: u64 = 0;
 
     for line in reader.lines() {
@@ -87,11 +92,6 @@ fn read_ledger(path: &PathBuf) -> LedgerRead {
             Ok(v) => v,
             Err(_) => continue, // torn line mid-write; skip it
         };
-        // Only count rows the daily buckets do not already carry.
-        let source = value.get("source").and_then(|s| s.as_str()).unwrap_or("");
-        if source == "proxy" {
-            continue;
-        }
         let saved = value
             .get("saved")
             .and_then(|s| s.as_u64())
@@ -111,6 +111,35 @@ fn read_ledger(path: &PathBuf) -> LedgerRead {
             .get("ts")
             .and_then(|t| t.as_str())
             .and_then(parse_iso_day);
+
+        // Per-sender breakdown covers every source (proxy + MCP + CLI): this is
+        // the only place the history chart can learn WHO saved tokens.
+        let client = value
+            .get("client")
+            .and_then(|c| c.as_str())
+            .map(|c| c.trim())
+            .filter(|c| !c.is_empty())
+            .unwrap_or("unknown");
+        // The tracker's own health rows record client "proxy"; treat them as
+        // unknown — they are the proxy itself, not an end user.
+        let client = if client == "proxy" || client == "probe" {
+            "unknown"
+        } else {
+            client
+        };
+        if let Some(day) = day.as_deref() {
+            *by_source_day
+                .entry(day.to_string())
+                .or_insert_with(BTreeMap::new)
+                .entry(client.to_string())
+                .or_insert(0) += saved;
+        }
+
+        // Only count rows the daily buckets do not already carry.
+        let source = value.get("source").and_then(|s| s.as_str()).unwrap_or("");
+        if source == "proxy" {
+            continue;
+        }
         match day {
             Some(day) => {
                 let entry = acc.entry(day).or_insert(DayAccumulator { tokens_saved: 0 });
@@ -131,6 +160,7 @@ fn read_ledger(path: &PathBuf) -> LedgerRead {
         .collect();
     LedgerRead::Ok(LedgerSavings {
         by_utc_day,
+        by_source_day,
         total_tokens_saved: total,
     })
 }
@@ -163,7 +193,7 @@ pub fn aggregated() -> LedgerSavings {
 /// Drop the TTL cache. Tests write temporary ledgers and must not read a
 /// stale cached value; nothing at runtime calls this.
 #[cfg(test)]
-fn clear_cache() {
+pub(crate) fn clear_cache_for_tests() {
     if let Ok(mut cache) = CACHE.lock() {
         *cache = None;
     }
@@ -174,7 +204,7 @@ mod tests {
     use super::*;
 
     fn write_tmp(tag: &str, rows: &[&str]) -> PathBuf {
-        clear_cache();
+        clear_cache_for_tests();
         let dir = std::env::temp_dir().join(format!(
             "ledger_savings_test_{}_{}",
             tag,
@@ -203,10 +233,10 @@ mod tests {
     #[test]
     fn sums_only_non_proxy_rows_per_utc_day() {
         let path = write_tmp("sums_only_non_proxy", &[
-            r#"{"ts":"2026-11-25T10:00:00+00:00","saved":371,"source":"mcp","pid":1}"#,
-            r#"{"ts":"2026-11-25T11:00:00+00:00","saved":4000,"source":"mcp","pid":2}"#,
-            r#"{"ts":"2026-11-25T09:00:00+00:00","saved":5000,"source":"proxy","pid":3}"#,
-            r#"{"ts":"2026-11-24T08:00:00+00:00","saved":100,"source":"cli","pid":4}"#,
+            r#"{"ts":"2026-11-25T10:00:00+00:00","saved":371,"source":"mcp","pid":1,"client":"cursor-vscode"}"#,
+            r#"{"ts":"2026-11-25T11:00:00+00:00","saved":4000,"source":"mcp","pid":2,"client":"probe"}"#,
+            r#"{"ts":"2026-11-25T09:00:00+00:00","saved":5000,"source":"proxy","pid":3,"client":"claude-code"}"#,
+            r#"{"ts":"2026-11-24T08:00:00+00:00","saved":100,"source":"cli","pid":4,"client":"opencode"}"#,
         ]);
         let value = read_ledger(&path);
         match value {
@@ -215,6 +245,13 @@ mod tests {
                 assert_eq!(savings.by_utc_day.get("2026-11-25"), Some(&4371));
                 assert_eq!(savings.by_utc_day.get("2026-11-24"), Some(&100));
                 assert_eq!(savings.by_utc_day.get("2026-11-23"), None);
+                // Per-sender: all sources, probe folded into unknown.
+                let day25 = savings.by_source_day.get("2026-11-25").unwrap();
+                assert_eq!(day25.get("cursor-vscode"), Some(&371));
+                assert_eq!(day25.get("unknown"), Some(&4000));
+                assert_eq!(day25.get("claude-code"), Some(&5000));
+                let day24 = savings.by_source_day.get("2026-11-24").unwrap();
+                assert_eq!(day24.get("opencode"), Some(&100));
             }
             _ => panic!("expected Ok"),
         }
@@ -224,7 +261,10 @@ mod tests {
     fn empty_missing_reads_as_default() {
         let path = write_tmp("empty_missing", &[]);
         match read_ledger(&path) {
-            LedgerRead::Ok(savings) => assert_eq!(savings.total_tokens_saved, 0),
+            LedgerRead::Ok(savings) => {
+                assert_eq!(savings.total_tokens_saved, 0);
+                assert!(savings.by_source_day.is_empty());
+            }
             _ => panic!("expected Ok"),
         }
     }
