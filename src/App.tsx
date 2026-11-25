@@ -1960,6 +1960,9 @@ export default function App() {
   // status with its own stale signed-out one.
   const pricingStatusOrderRef = useRef(createPricingStatusOrder());
   const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "register">("register");
+  const [authForgotBusy, setAuthForgotBusy] = useState(false);
   const [authCode, setAuthCode] = useState("");
   const [authCodeRequestedFor, setAuthCodeRequestedFor] = useState<string | null>(null);
   const [authRequestBusy, setAuthRequestBusy] = useState(false);
@@ -4588,78 +4591,42 @@ export default function App() {
     setAuthFlowSuccess(null);
   }
 
-  async function handleRequestAuthCode() {
+  async function handlePasswordSubmit(mode: "login" | "register") {
     if (!authEmailValid) {
       setAuthFlowError("Enter a valid email address.");
       return;
     }
-    setAuthRequestBusy(true);
-    setAuthFlowError(null);
-    setAuthFlowSuccess(null);
-    try {
-      const result = await invoke<HeadroomAuthCodeRequest>("request_headroom_auth_code", {
-        email: authEmail.trim()
-      });
-      reportFunnelStep("email_code_requested");
-      setAuthCodeRequestedFor(result.email);
-      // Main window only: localStorage is shared per origin, so a request
-      // made on the launcher's sign-up gate would otherwise resurface here on the
-      // next mount. Best effort: the code is already sent, so a storage
-      // failure must not turn into a "could not send" error.
-      if (windowLabel === "main") {
-        try {
-          window.localStorage.setItem(
-            pendingAuthStorageKey,
-            JSON.stringify({
-              email: result.email,
-              expiresAt:
-                Date.now() + (result.expiresInSeconds || authCodeExpiryFallbackSeconds) * 1000
-            })
-          );
-        } catch {
-          // Reload recovery is lost for this request; the flow still works.
-        }
-      }
-      setAuthFlowSuccess(
-        authCodeSentMessage(
-          result.email,
-          result.expiresInSeconds || authCodeExpiryFallbackSeconds
-        )
-      );
-    } catch (error) {
-      setAuthFlowError(describeInvokeError(error, "Could not send sign-in code."));
-    } finally {
-      setAuthRequestBusy(false);
-    }
-  }
-
-  async function handleVerifyAuthCode() {
-    if (!authEmailValid) {
-      setAuthFlowError("Enter a valid email address.");
+    if (!authPassword) {
+      setAuthFlowError("Enter your password.");
       return;
     }
-    if (!authCode.trim()) {
-      setAuthFlowError("Enter the authentication code from your email.");
-      return;
-    }
-    await verifyAuthCode(authEmail.trim(), authCode.trim());
+    const command =
+      mode === "register" ? "register_headroom_account" : "login_headroom_account";
+    await submitPasswordAuth(command, authEmail.trim(), authPassword, mode);
   }
 
-  async function verifyAuthCode(email: string, code: string): Promise<boolean> {
+  // Shared submit for login/register: calls the Supabase-backed command, then
+  // mirrors the OTP flow's success handling (persist status, reset form state,
+  // navigate to the upgrade view, refresh connectors).
+  async function submitPasswordAuth(
+    command: "register_headroom_account" | "login_headroom_account",
+    email: string,
+    password: string,
+    mode: "login" | "register"
+  ): Promise<boolean> {
     setAuthVerifyBusy(true);
     setAuthFlowError(null);
     setAuthFlowSuccess(null);
     try {
-      const status = await invoke<HeadroomPricingStatus>("verify_headroom_auth_code", {
-        email,
-        code
-      });
+      const status = await invoke<HeadroomPricingStatus>(command, { email, password });
       pricingStatusOrderRef.current.wrote();
       setPricingStatus(status);
       setAuthCode("");
       setAuthCodeRequestedFor(null);
-      reportFunnelStep("email_code_verified");
-      setAuthFlowSuccess("Headroom account connected.");
+      reportFunnelStep(mode === "register" ? "email_code_requested" : "email_code_verified");
+      setAuthFlowSuccess(mode === "register" ? "Account created." : "Signed in to Headroom.");
+      // Clear the one-shot mode so the next open shows the default again.
+      setAuthMode("register");
       setPendingUpgradePlanId(null);
       // The launcher's sign-up gate renders its own sign-in inline; switching the
       // (hidden) main-window view would be meaningless there.
@@ -4673,10 +4640,30 @@ export default function App() {
       void refreshConnectors();
       return true;
     } catch (error) {
-      setAuthFlowError(describeInvokeError(error, "Could not verify sign-in code."));
+      setAuthFlowError(
+        describeInvokeError(error, mode === "register" ? "Could not create your account." : "Could not sign in.")
+      );
       return false;
     } finally {
       setAuthVerifyBusy(false);
+    }
+  }
+
+  async function handleForgotPassword() {
+    if (!authEmailValid) {
+      setAuthFlowError("Enter a valid email address.");
+      return;
+    }
+    setAuthForgotBusy(true);
+    setAuthFlowError(null);
+    setAuthFlowSuccess(null);
+    try {
+      await invoke("reset_headroom_password", { email: authEmail.trim() });
+      setAuthFlowSuccess("Password reset link sent. Check your email.");
+    } catch (error) {
+      setAuthFlowError(describeInvokeError(error, "Could not send the password reset link."));
+    } finally {
+      setAuthForgotBusy(false);
     }
   }
 
@@ -4751,13 +4738,14 @@ export default function App() {
     if (!magicLinkPending) {
       return;
     }
-    const [email, code] = magicLinkPending;
+    // The parked magic link only carries email + an (now deprecated) OTP code.
+    // With email/password sign-in, the deep link becomes a convenient way to
+    // pre-fill the email; the user completes the password-based login/register
+    // inline. Drop the confirm overlay and land on the form with the email set.
+    const [email] = magicLinkPending;
     setMagicLinkPending(null);
-    setMagicLinkState("verifying");
-    const verified = await verifyAuthCode(email, code);
-    // Success needs no screen: clearing this drops the user straight onto the
-    // next onboarding step, already signed in.
-    setMagicLinkState(verified ? null : "failed");
+    setAuthEmail(email);
+    setMagicLinkState(null);
   }
 
   function dismissMagicLink() {
@@ -5332,15 +5320,16 @@ export default function App() {
                 email={authEmail}
                 onEmailChange={setAuthEmail}
                 emailValid={authEmailValid}
-                code={authCode}
-                onCodeChange={setAuthCode}
-                codeRequested={authCodeRequestedFor !== null}
-                requestBusy={authRequestBusy}
-                verifyBusy={authVerifyBusy}
+                password={authPassword}
+                onPasswordChange={setAuthPassword}
+                mode={authMode}
+                onModeChange={setAuthMode}
+                submitBusy={authVerifyBusy}
                 error={authFlowError}
                 success={authFlowSuccess}
-                onRequestCode={() => void handleRequestAuthCode()}
-                onVerify={() => void handleVerifyAuthCode()}
+                onSubmit={(mode) => void handlePasswordSubmit(mode)}
+                forgotBusy={authForgotBusy}
+                onForgotPassword={() => void handleForgotPassword()}
               />
             )
           ) : undefined
@@ -6818,97 +6807,108 @@ export default function App() {
           <h2>{upgradeAuthMessage}.</h2>
         </div>
       </div>
-      {!authCodeRequestedFor ? (
-        <>
-          <div className="pricing-auth-card__grid pricing-auth-card__grid--single">
-            <label className="pricing-auth-field">
-              <span>Email</span>
-              <div className="pricing-auth-field__input">
-                <EnvelopeSimple size={16} weight="bold" />
-                <input
-                  onChange={(event) => {
-                    setAuthEmail(event.target.value);
-                    setAuthFlowError(null);
-                  }}
-                  placeholder="you@example.com"
-                  type="email"
-                  value={authEmail}
-                />
-              </div>
-            </label>
+      <div className="pricing-auth-card__grid pricing-auth-card__grid--single">
+        <label className="pricing-auth-field">
+          <span>Email</span>
+          <div className="pricing-auth-field__input">
+            <EnvelopeSimple size={16} weight="bold" />
+            <input
+              onChange={(event) => {
+                setAuthEmail(event.target.value);
+                setAuthFlowError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && authEmailValid && authPassword) {
+                  void handlePasswordSubmit(authMode);
+                }
+              }}
+              placeholder="you@example.com"
+              type="email"
+              value={authEmail}
+            />
           </div>
-          <div className="pricing-auth-card__actions">
-            <button
-              className="primary-button"
-              disabled={!authEmailValid || authRequestBusy}
-              onClick={() => void handleRequestAuthCode()}
-              type="button"
-            >
-              {authRequestBusy ? "Sending..." : "Sign in"}
-            </button>
+        </label>
+      </div>
+      <div className="pricing-auth-card__grid pricing-auth-card__grid--single">
+        <label className="pricing-auth-field">
+          <span>Password</span>
+          <div className="pricing-auth-field__input">
+            <Key size={16} weight="bold" />
+            <input
+              onChange={(event) => {
+                setAuthPassword(event.target.value);
+                setAuthFlowError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && authEmailValid && authPassword) {
+                  void handlePasswordSubmit(authMode);
+                }
+              }}
+              placeholder="Password"
+              type="password"
+              value={authPassword}
+            />
           </div>
-          <p className="pricing-auth-card__legal">
-            {"By signing in, you agree to our "}
-            <button className="link-button" onClick={() => openLinkFromClick("https://extraheadroom.com/terms")} type="button">Terms of Service</button>
-            {" and "}
-            <button className="link-button" onClick={() => openLinkFromClick("https://extraheadroom.com/privacy")} type="button">Privacy Policy</button>
-            {"."}
-          </p>
-        </>
-      ) : (
-        <>
-          <div className="pricing-auth-card__code-step">
-            <p className="pricing-auth-card__step-copy">
-              Enter the authentication code we sent to <strong>{authCodeRequestedFor}</strong>.
-            </p>
-            <button
-              className="link-button pricing-auth-card__change-email"
-              onClick={resetUpgradeAuthStep}
-              type="button"
-            >
-              Use a different email
-            </button>
-          </div>
-          <div className="pricing-auth-card__grid pricing-auth-card__grid--single">
-            <label className="pricing-auth-field">
-              <span>Authentication code</span>
-              <div className="pricing-auth-field__input">
-                <Key size={16} weight="bold" />
-                <input
-                  onChange={(event) => {
-                    setAuthCode(event.target.value);
-                    setAuthFlowError(null);
-                  }}
-                  placeholder={`Enter the code sent to ${authCodeRequestedFor}`}
-                  type="text"
-                  value={authCode}
-                />
-              </div>
-            </label>
-          </div>
-          <div className="pricing-auth-card__actions">
-            <button
-              className="primary-button"
-              disabled={!authCode.trim() || authVerifyBusy}
-              onClick={() => void handleVerifyAuthCode()}
-              type="button"
-            >
-              {authVerifyBusy ? "Verifying..." : "Verify and continue"}
-            </button>
-            <p className="pricing-auth-card__resend">
-              Didn't receive a code?{" "}
-              <button
-                className="link-button"
-                disabled={authRequestBusy}
-                onClick={() => void handleRequestAuthCode()}
-                type="button"
-              >
-                {authRequestBusy ? "Sending..." : "Resend code"}
-              </button>
-            </p>
-          </div>
-        </>
-      )}
+        </label>
+      </div>
+
+      <div className="pricing-auth-card__toggle" role="tablist" aria-label="Sign in or create an account">
+        <button
+          className={`pricing-auth-card__toggle-btn${authMode === "login" ? " is-active" : ""}`}
+          disabled={authVerifyBusy}
+          onClick={() => setAuthMode("login")}
+          role="tab"
+          aria-selected={authMode === "login"}
+          type="button"
+        >
+          Login
+        </button>
+        <button
+          className={`pricing-auth-card__toggle-btn${authMode === "register" ? " is-active" : ""}`}
+          disabled={authVerifyBusy}
+          onClick={() => setAuthMode("register")}
+          role="tab"
+          aria-selected={authMode === "register"}
+          type="button"
+        >
+          Register
+        </button>
+      </div>
+
+      <div className="pricing-auth-card__actions">
+        <button
+          className="primary-button"
+          disabled={!authEmailValid || !authPassword || authVerifyBusy}
+          onClick={() => void handlePasswordSubmit(authMode)}
+          type="button"
+        >
+          {authVerifyBusy
+            ? authMode === "register"
+              ? "Creating account..."
+              : "Signing in..."
+            : authMode === "register"
+              ? "Create account"
+              : "Sign in"}
+        </button>
+        <p className="pricing-auth-card__resend">
+          Forgot your password?{" "}
+          <button
+            className="link-button"
+            disabled={authForgotBusy}
+            onClick={() => void handleForgotPassword()}
+            type="button"
+          >
+            {authForgotBusy ? "Sending reset link..." : "Reset it"}
+          </button>
+        </p>
+      </div>
+      <p className="pricing-auth-card__legal">
+        {"By signing in, you agree to our "}
+        <button className="link-button" onClick={() => openLinkFromClick("https://extraheadroom.com/terms")} type="button">Terms of Service</button>
+        {" and "}
+        <button className="link-button" onClick={() => openLinkFromClick("https://extraheadroom.com/privacy")} type="button">Privacy Policy</button>
+        {"."}
+      </p>
       {authFlowError ? (
         <p className="install-progress__error">{authFlowError}</p>
       ) : null}

@@ -17,6 +17,7 @@ mod desktop_mcp;
 mod device;
 mod env_fault;
 mod keychain;
+mod ledger_savings;
 mod logging;
 mod memory_scrubber;
 mod models;
@@ -5486,6 +5487,71 @@ async fn sign_out_headroom_account(app: AppHandle) -> Result<(), String> {
     .map_err(|err| err.to_string())?
 }
 
+/// Register a Headroom account (email + password) and sign in. Registration
+/// is idempotent: the gateway logs into the account when the email already
+/// exists. Mirrors `verify_headroom_auth_code` in gate reconciliation and
+/// broadcast so the sign-in UX and runtime gating stay identical.
+#[tauri::command]
+async fn register_headroom_account(
+    app: AppHandle,
+    email: String,
+    password: String,
+) -> Result<HeadroomPricingStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        let status = pricing::register_headroom_account(&state, &email, &password)?;
+        reconcile_pricing_after_sign_in(&app, &status);
+        let _ = app.emit("pricing-refreshed", &status);
+        Ok(status)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// Sign in to an existing Headroom account (email + password).
+#[tauri::command]
+async fn login_headroom_account(
+    app: AppHandle,
+    email: String,
+    password: String,
+) -> Result<HeadroomPricingStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        let status = pricing::login_headroom_account(&state, &email, &password)?;
+        reconcile_pricing_after_sign_in(&app, &status);
+        let _ = app.emit("pricing-refreshed", &status);
+        Ok(status)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// Send a password-recovery email for the given address.
+#[tauri::command]
+async fn reset_headroom_password(
+    app: AppHandle,
+    email: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pricing::reset_headroom_password(&app.state(), &email)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// Shared post-sign-in work for the password auth commands: apply the pricing
+/// gates on a worker thread (Python boot is slow and must not hold the IPC
+/// path) and broadcast the fresh status so every window updates. Same idiom
+/// as `verify_headroom_auth_code`.
+fn reconcile_pricing_after_sign_in(app: &AppHandle, status: &HeadroomPricingStatus) {
+    let app_handle = app.clone();
+    let status = status.clone();
+    std::thread::spawn(move || {
+        let state: tauri::State<'_, AppState> = app_handle.state();
+        state.apply_pricing_gates(&status);
+    });
+}
+
 #[tauri::command]
 async fn activate_headroom_account(app: AppHandle) -> Result<HeadroomPricingStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -8974,6 +9040,9 @@ pub fn run() {
             take_pending_magic_link,
             request_headroom_auth_code,
             verify_headroom_auth_code,
+            register_headroom_account,
+            login_headroom_account,
+            reset_headroom_password,
             sign_out_headroom_account,
             activate_headroom_account,
             create_headroom_checkout_session,

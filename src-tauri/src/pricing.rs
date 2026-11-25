@@ -1101,6 +1101,25 @@ struct VerifyCodePayload<'a> {
     identity: IdentityPayload,
 }
 
+/// POST desktop/auth/register and desktop/auth/login body.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PasswordAuthPayload<'a> {
+    email: &'a str,
+    password: &'a str,
+    #[serde(flatten)]
+    identity: IdentityPayload,
+}
+
+/// POST desktop/auth/reset_password body.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResetPasswordPayload<'a> {
+    email: &'a str,
+    #[serde(flatten)]
+    identity: IdentityPayload,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CheckoutSessionPayload {
@@ -1771,11 +1790,32 @@ pub(crate) fn verify_auth_code_with_base_url(
 
     write_session_token(&body.session_token)?;
 
+    let account = remote_account_to_profile(body.account);
+    let promo = build_promo(
+        body.active_percent_off,
+        &body.pricing_ladder,
+        &body.intro_offer,
+        &body.plan_prices,
+    );
+    finalize_authenticated_session(state, account, promo)
+}
+
+/// Shared tail of every successful sign-in (OTP verify, password login,
+/// register). The session token is already persisted; this reconciles local
+/// state, remembers the account email, folds in the live Claude/Codex profile
+/// for tier mismatch, and emits the pricing status that gates optimization.
+///
+/// Kept in one place so the OTP path (still served for old builds) and the
+/// Supabase email/password paths can't drift apart on the license decision.
+fn finalize_authenticated_session(
+    state: &AppState,
+    account: HeadroomAccountProfile,
+    promo: PricingPromo,
+) -> Result<HeadroomPricingStatus, String> {
     let mut local_state = reconcile_local_state_with_server(state)?;
     let local_grace_ends_at = local_state.first_seen_at + Duration::hours(LOCAL_GRACE_PERIOD_HOURS);
     let claude = detect_claude_profile(state);
     let last_known_good_plan_tier = state.last_known_good_plan_tier();
-    let account = remote_account_to_profile(body.account);
     // Remembered now, not on the first background sync: if that sync fails,
     // Settings still shows which account is signed in.
     remember_account_email(&mut local_state, Some(&account));
@@ -1803,15 +1843,186 @@ pub(crate) fn verify_auth_code_with_base_url(
         None,
         Some(account),
         claude,
-        build_promo(
-            body.active_percent_off,
-            &body.pricing_ladder,
-            &body.intro_offer,
-            &body.plan_prices,
-        ),
+        promo,
         last_known_good_plan_tier,
         tier_mismatch,
     ))
+}
+
+/// Common request plumbing for the Supabase email/password endpoints: POST the
+/// payload to `path`, surface a clean error, and parse the session envelope.
+fn post_password_auth(
+    state: &AppState,
+    base_url: &str,
+    path: &str,
+    action: &str,
+    email: &str,
+    password: Option<&str>,
+) -> Result<VerifyCodeResponse, String> {
+    let trimmed_email = email.trim().to_ascii_lowercase();
+    if trimmed_email.is_empty() || !trimmed_email.contains('@') {
+        return Err("Enter a valid email address.".into());
+    }
+    if let Some(pw) = password {
+        if pw.trim().is_empty() {
+            return Err("Enter your password.".into());
+        }
+    }
+
+    let response = http_client()?
+        .post(join_url(base_url, path))
+        .timeout(AUTH_REQUEST_TIMEOUT)
+        .header("X-Headroom-App-Version", env!("CARGO_PKG_VERSION"))
+        .json(&PasswordAuthPayload {
+            email: &trimmed_email,
+            password: password.unwrap_or_default(),
+            identity: IdentityPayload::for_state(state),
+        })
+        .send()
+        .map_err(|err| {
+            let msg = transport_failure(action, &err);
+            capture_transport_failure("auth-password", &msg, &err);
+            msg
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        // Prefer the gateway's human message (invalid creds, confirm email...).
+        let api_error: Option<String> = response
+            .text()
+            .ok()
+            .and_then(|body| serde_json::from_str::<ApiErrorResponse>(&body).ok())
+            .and_then(|parsed| parsed.error)
+            .filter(|value| !value.trim().is_empty());
+        if let Some(msg) = api_error {
+            return Err(msg);
+        }
+        return Err(format!("Could not {action} (status {status})."));
+    }
+
+    response
+        .json::<VerifyCodeResponse>()
+        .map_err(|err| format!("Could not parse {action} response: {err}"))
+}
+
+/// Register a Headroom account (email + password) and sign in. The gateway
+/// creates the Supabase Auth user when the email is new, or logs into the
+/// existing account when it isn't, so "register" is idempotent.
+pub fn register_headroom_account(
+    state: &AppState,
+    email: &str,
+    password: &str,
+) -> Result<HeadroomPricingStatus, String> {
+    register_headroom_account_with_base_url(state, email, password, &api_base_url())
+}
+
+/// Test-only seam: `register_headroom_account` against a parameterized base URL.
+pub(crate) fn register_headroom_account_with_base_url(
+    state: &AppState,
+    email: &str,
+    password: &str,
+    base_url: &str,
+) -> Result<HeadroomPricingStatus, String> {
+    let body = post_password_auth(
+        state,
+        base_url,
+        "desktop/auth/register",
+        "register your account",
+        email,
+        Some(password),
+    )?;
+    write_session_token(&body.session_token)?;
+    let account = remote_account_to_profile(body.account);
+    let promo = build_promo(
+        body.active_percent_off,
+        &body.pricing_ladder,
+        &body.intro_offer,
+        &body.plan_prices,
+    );
+    finalize_authenticated_session(state, account, promo)
+}
+
+/// Sign in to an existing Headroom account (email + password).
+pub fn login_headroom_account(
+    state: &AppState,
+    email: &str,
+    password: &str,
+) -> Result<HeadroomPricingStatus, String> {
+    login_headroom_account_with_base_url(state, email, password, &api_base_url())
+}
+
+/// Test-only seam: `login_headroom_account` against a parameterized base URL.
+pub(crate) fn login_headroom_account_with_base_url(
+    state: &AppState,
+    email: &str,
+    password: &str,
+    base_url: &str,
+) -> Result<HeadroomPricingStatus, String> {
+    let body = post_password_auth(
+        state,
+        base_url,
+        "desktop/auth/login",
+        "sign in",
+        email,
+        Some(password),
+    )?;
+    write_session_token(&body.session_token)?;
+    let account = remote_account_to_profile(body.account);
+    let promo = build_promo(
+        body.active_percent_off,
+        &body.pricing_ladder,
+        &body.intro_offer,
+        &body.plan_prices,
+    );
+    finalize_authenticated_session(state, account, promo)
+}
+
+/// Send a password-recovery email for the given address. The gateway answers
+/// 200 for both existing and unknown addresses (no user enumeration), so this
+/// only returns an error on transport/validation failures.
+pub fn reset_headroom_password(state: &AppState, email: &str) -> Result<(), String> {
+    reset_headroom_password_with_base_url(state, email, &api_base_url())
+}
+
+/// Test-only seam: `reset_headroom_password` against a parameterized base URL.
+pub(crate) fn reset_headroom_password_with_base_url(
+    state: &AppState,
+    email: &str,
+    base_url: &str,
+) -> Result<(), String> {
+    let trimmed_email = email.trim().to_ascii_lowercase();
+    if trimmed_email.is_empty() || !trimmed_email.contains('@') {
+        return Err("Enter a valid email address.".into());
+    }
+
+    let response = http_client()?
+        .post(join_url(base_url, "desktop/auth/reset_password"))
+        .timeout(AUTH_REQUEST_TIMEOUT)
+        .json(&ResetPasswordPayload {
+            email: &trimmed_email,
+            identity: IdentityPayload::for_state(state),
+        })
+        .send()
+        .map_err(|err| {
+            let msg = transport_failure("send the password reset email", &err);
+            capture_transport_failure("auth-reset-password", &msg, &err);
+            msg
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let api_error: Option<String> = response
+            .text()
+            .ok()
+            .and_then(|body| serde_json::from_str::<ApiErrorResponse>(&body).ok())
+            .and_then(|parsed| parsed.error)
+            .filter(|value| !value.trim().is_empty());
+        if let Some(msg) = api_error {
+            return Err(msg);
+        }
+        return Err(format!("Could not send the password reset email (status {status})."));
+    }
+    Ok(())
 }
 
 pub fn sign_out() -> Result<(), String> {
@@ -7550,6 +7761,163 @@ mod tests {
             !err.contains("error sending request") && !err.contains("127.0.0.1"),
             "leaked reqwest internals: {err}"
         );
+        drop_state(dir);
+    }
+
+    // ── register / login / reset (Supabase email + password) ─
+
+    #[test]
+    #[serial_test::serial]
+    fn login_decodes_session_envelope_and_writes_token() {
+        // AuthedTestEnv redirects HOME/XDG/HEADROOM_DATA_DIR to a scratch dir
+        // and seeds a session token there, so the write assertion below is
+        // isolated from the real keychain and from parallel test processes.
+        let _env = AuthedTestEnv::new("session-seeded");
+
+        let body = serde_json::json!({
+            "sessionToken": "session-pw-xyz",
+            "account": {
+                "email": "user@example.com",
+                "trialStartedAt": "2026-04-01T00:00:00Z",
+                "trialEndsAt": "2026-04-15T00:00:00Z",
+                "trialActive": true,
+                "subscriptionActive": false,
+                "subscriptionTier": null,
+                "inviteCode": null,
+                "acceptedInvitesCount": 0,
+                "inviteBonusPercent": 0
+            }
+        });
+        let (port, server) = spawn_canned_response_server(body, "HTTP/1.1 200 OK");
+        let (state, dir) = temp_app_state();
+
+        let status = super::login_headroom_account_with_base_url(
+            &state,
+            "user@example.com",
+            "secret-password",
+            &format!("http://127.0.0.1:{port}"),
+        )
+        .expect("login succeeds");
+
+        assert!(status.authenticated);
+        assert_eq!(
+            status.account.as_ref().map(|a| a.email.as_str()),
+            Some("user@example.com")
+        );
+        assert_eq!(stored_session_token().as_deref(), Some("session-pw-xyz"));
+
+        server.join().unwrap();
+        drop_state(dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn register_decodes_session_envelope_and_writes_token() {
+        let _env = AuthedTestEnv::new("session-seeded");
+
+        let body = serde_json::json!({
+            "sessionToken": "session-reg-xyz",
+            "account": {
+                "email": "new@example.com",
+                "trialStartedAt": "2026-04-01T00:00:00Z",
+                "trialEndsAt": "2026-04-08T00:00:00Z",
+                "trialActive": true,
+                "subscriptionActive": false,
+                "subscriptionTier": null,
+                "inviteCode": null,
+                "acceptedInvitesCount": 0,
+                "inviteBonusPercent": 0
+            }
+        });
+        let (port, server) = spawn_canned_response_server(body, "HTTP/1.1 201 Created");
+        let (state, dir) = temp_app_state();
+
+        let status = super::register_headroom_account_with_base_url(
+            &state,
+            "new@example.com",
+            "another-password",
+            &format!("http://127.0.0.1:{port}"),
+        )
+        .expect("register succeeds");
+
+        assert!(status.authenticated);
+        assert_eq!(
+            status.account.as_ref().map(|a| a.email.as_str()),
+            Some("new@example.com")
+        );
+        assert_eq!(stored_session_token().as_deref(), Some("session-reg-xyz"));
+
+        server.join().unwrap();
+        drop_state(dir);
+    }
+
+    #[test]
+    fn password_auth_rejects_blank_password_before_hitting_server() {
+        let (state, dir) = temp_app_state();
+        let err = super::register_headroom_account_with_base_url(
+            &state,
+            "user@example.com",
+            "   ",
+            "http://127.0.0.1:1",
+        )
+        .expect_err("blank password rejected");
+        assert!(err.contains("password"), "unexpected: {err}");
+        drop_state(dir);
+    }
+
+    #[test]
+    fn password_auth_surfaces_gateway_error_message() {
+        // A 401 with an envelope error should surface the gateway's message,
+        // not a generic status line.
+        let body = serde_json::json!({ "error": "Invalid login credentials" });
+        let (port, server) = spawn_canned_response_server(body, "HTTP/1.1 401 Unauthorized");
+        let (state, dir) = temp_app_state();
+
+        let err = super::login_headroom_account_with_base_url(
+            &state,
+            "user@example.com",
+            "wrong-password",
+            &format!("http://127.0.0.1:{port}"),
+        )
+        .expect_err("401 surfaces as error");
+        assert!(err.contains("Invalid login credentials"), "unexpected: {err}");
+
+        server.join().unwrap();
+        drop_state(dir);
+    }
+
+    #[test]
+    fn reset_password_returns_ok_on_200() {
+        let body = serde_json::json!({ "ok": true });
+        let (port, server) = spawn_canned_response_server(body, "HTTP/1.1 200 OK");
+        let (state, dir) = temp_app_state();
+
+        super::reset_headroom_password_with_base_url(
+            &state,
+            "user@example.com",
+            &format!("http://127.0.0.1:{port}"),
+        )
+        .expect("reset succeeds");
+
+        server.join().unwrap();
+        drop_state(dir);
+    }
+
+    #[test]
+    fn reset_password_surfaces_gateway_error_message() {
+        let body = serde_json::json!({ "error": "Email rate limit exceeded" });
+        let (port, server) = spawn_canned_response_server(body, "HTTP/1.1 429 Too Many Requests");
+        let (state, dir) = temp_app_state();
+
+        let err = super::reset_headroom_password_with_base_url(
+            &state,
+            "user@example.com",
+            &format!("http://127.0.0.1:{port}"),
+        )
+        .expect_err("429 surfaces as error");
+        assert!(err.contains("Email rate limit"), "unexpected: {err}");
+
+        server.join().unwrap();
         drop_state(dir);
     }
 

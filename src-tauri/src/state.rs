@@ -2855,6 +2855,60 @@ impl AppState {
         // live local-day hours are never ingested, keep None here, and so
         // fall through to the fresh derivation.
         {
+            // Overlay non-proxy ledger savings (MCP tools, CLI-side work, ...)
+            // onto the daily buckets. The proxy's `/stats` path never sees
+            // these rows, so they are the one gap the backend total misses.
+            // Summed into `estimated_tokens_saved` (measured input tokens the
+            // client never sent) so the lifetime total -- the sum of the
+            // buckets -- rises with them, exactly like the other input layers.
+            let ledger = crate::ledger_savings::aggregated();
+            if ledger.total_tokens_saved > 0 {
+                for point in daily_savings.iter_mut() {
+                    let Some(delta) = ledger.by_utc_day.get(&point.date) else {
+                        continue;
+                    };
+                    if *delta > 0 {
+                        point.estimated_tokens_saved =
+                            point.estimated_tokens_saved.saturating_add(*delta);
+                    }
+                }
+                // A ledger day with no bucket yet (e.g. MCP ran while the app
+                // was closed): append it so the chart and lifetime keep it.
+                let existing: std::collections::BTreeSet<&str> = daily_savings
+                    .iter()
+                    .map(|p| p.date.as_str())
+                    .collect();
+                let mut added: Vec<DailySavingsPoint> = Vec::new();
+                for (day, delta) in &ledger.by_utc_day {
+                    if *delta > 0 && !existing.contains(day.as_str()) {
+                        added.push(DailySavingsPoint {
+                            date: day.clone(),
+                            estimated_savings_usd: 0.0,
+                            estimated_tokens_saved: *delta,
+                            actual_cost_usd: 0.0,
+                            total_tokens_sent: 0,
+                            new_input_tokens: 0,
+                            tool_schema_savings_usd: 0.0,
+                            tool_schema_tokens_saved: 0,
+                            output_savings_usd: 0.0,
+                            output_tokens_saved: 0,
+                            cache_read_tokens: None,
+                            cache_savings_usd: None,
+                            cache_read_cost_usd: None,
+                            output_sampled_tokens_saved: None,
+                            output_baseline_tokens: None,
+                            output_ab_tokens_saved: None,
+                            output_ab_baseline_tokens: None,
+                            utc_keyed: true,
+                        });
+                    }
+                }
+                daily_savings.extend(added);
+                daily_savings.sort_by(|a, b| a.date.cmp(&b.date));
+            }
+        }
+
+        {
             let tracker = self.savings_tracker.lock();
             for point in daily_savings.iter_mut() {
                 if let Some(sample) = tracker.output_daily_samples.get(&point.date) {

@@ -1542,6 +1542,38 @@ select {
   text-align: center;
 }
 
+.pricing-auth-card__toggle {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+}
+
+.pricing-auth-card__toggle-btn {
+  flex: 1;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 8px;
+  cursor: pointer;
+}
+
+.pricing-auth-card__toggle-btn.is-active {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.pricing-auth-card__toggle-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .pricing-auth-card__code-step {
   display: grid;
   gap: 4px;
@@ -6209,6 +6241,47 @@ html.window-hiding {
 .paywall__auth-row {
   display: flex;
   gap: 8px;
+}
+
+.paywall__auth-toggle {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+}
+
+.paywall__auth-toggle-btn {
+  flex: 1;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.paywall__auth-toggle-btn.is-active {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.paywall__auth-toggle-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.paywall__auth-actions {
+  align-items: center;
+}
+
+.paywall__auth-actions .link-button {
+  font-size: var(--text-xs);
+  white-space: nowrap;
 }
 
 .paywall__auth-input {

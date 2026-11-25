@@ -15,6 +15,13 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["src/test/setup.ts"],
+    // backend/ holds the gateway + its own Node-only integration tests
+    // (they spawn servers and call process.exit, so vitest must not run them).
+    exclude: [
+      "backend/**",
+      "node_modules/**",
+      "dist/**"
+    ],
     coverage: {
       provider: "v8",
       // READ THIS BEFORE QUOTING THE 90% BELOW.

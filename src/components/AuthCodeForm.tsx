@@ -1,19 +1,29 @@
-// Email + one-time-code sign-in block, rendered inside TermsGate on a fresh
-// install (paywall-first onboarding). Controlled by App state/handlers.
+// Email + password sign-in block, rendered inside TermsGate on a fresh
+// install (paywall-first onboarding) and in the upgrade-auth view. Controlled
+// by App state/handlers.
+//
+// Supabase-backed flow (see backend/gateway): "Login" calls desktop/auth/login,
+// "Register" calls desktop/auth/register, and the Forgot password link calls
+// desktop/auth/reset_password. Registration is idempotent - the gateway logs
+// into the account when the email already exists.
 export interface AuthCodeFormProps {
   lead?: string;
   email: string;
   onEmailChange: (value: string) => void;
   emailValid: boolean;
-  code: string;
-  onCodeChange: (value: string) => void;
-  codeRequested: boolean;
-  requestBusy: boolean;
-  verifyBusy: boolean;
+  password: string;
+  onPasswordChange: (value: string) => void;
+  /** Which submit button the user picked. Defaults to "login". */
+  mode: "login" | "register";
+  onModeChange: (mode: "login" | "register") => void;
+  submitBusy: boolean;
   error: string | null;
   success: string | null;
-  onRequestCode: () => void;
-  onVerify: () => void;
+  onSubmit: (mode: "login" | "register") => void;
+  /** Forgot-password link. Presenting a spinner/disabled state is up to the
+   * parent via `forgotBusy`; on success the parent sets `success`. */
+  forgotBusy?: boolean;
+  onForgotPassword?: () => void;
 }
 
 export function AuthCodeForm({
@@ -21,19 +31,54 @@ export function AuthCodeForm({
   email,
   onEmailChange,
   emailValid,
-  code,
-  onCodeChange,
-  codeRequested,
-  requestBusy,
-  verifyBusy,
+  password,
+  onPasswordChange,
+  mode,
+  onModeChange,
+  submitBusy,
   error,
   success,
-  onRequestCode,
-  onVerify
+  onSubmit,
+  forgotBusy = false,
+  onForgotPassword
 }: AuthCodeFormProps) {
+  const submitLabel =
+    mode === "register"
+      ? submitBusy
+        ? "Creating account…"
+        : "Create account"
+      : submitBusy
+        ? "Signing in…"
+        : "Sign in";
+
   return (
     <div className="paywall__auth soft-card">
       {lead ? <p className="paywall__auth-lead">{lead}</p> : null}
+
+      {/* Mode toggle: Register (default for a fresh install) / Login */}
+      <div className="paywall__auth-toggle" role="tablist" aria-label="Sign in or create an account">
+        <button
+          className={`paywall__auth-toggle-btn${mode === "login" ? " is-active" : ""}`}
+          disabled={submitBusy}
+          onClick={() => onModeChange("login")}
+          role="tab"
+          aria-selected={mode === "login"}
+          type="button"
+        >
+          Login
+        </button>
+        <button
+          className={`paywall__auth-toggle-btn${mode === "register" ? " is-active" : ""}`}
+          disabled={submitBusy}
+          onClick={() => onModeChange("register")}
+          role="tab"
+          aria-selected={mode === "register"}
+          type="button"
+        >
+          Register
+        </button>
+      </div>
+
       <div className="paywall__auth-row">
         <input
           className="paywall__auth-input"
@@ -42,34 +87,45 @@ export function AuthCodeForm({
           type="email"
           value={email}
         />
+      </div>
+
+      <div className="paywall__auth-row">
+        <input
+          className="paywall__auth-input"
+          onChange={(event) => onPasswordChange(event.target.value)}
+          onKeyDown={(event) => {
+            // Enter submits with the currently selected mode.
+            if (event.key === "Enter" && emailValid && password) {
+              onSubmit(mode);
+            }
+          }}
+          placeholder="Password"
+          type="password"
+          value={password}
+        />
+      </div>
+
+      <div className="paywall__auth-row paywall__auth-actions">
         <button
-          className="secondary-button"
-          disabled={!emailValid || requestBusy}
-          onClick={onRequestCode}
+          className="primary-button"
+          disabled={!emailValid || !password || submitBusy}
+          onClick={() => onSubmit(mode)}
           type="button"
         >
-          {requestBusy ? "Sending…" : codeRequested ? "Resend code" : "Send code"}
+          {submitLabel}
         </button>
-      </div>
-      {codeRequested ? (
-        <div className="paywall__auth-row paywall__auth-reveal">
-          <input
-            autoFocus
-            className="paywall__auth-input"
-            onChange={(event) => onCodeChange(event.target.value)}
-            placeholder="6-digit code"
-            value={code}
-          />
+        {onForgotPassword ? (
           <button
-            className="primary-button"
-            disabled={!code.trim() || verifyBusy}
-            onClick={onVerify}
+            className="link-button"
+            disabled={forgotBusy}
+            onClick={onForgotPassword}
             type="button"
           >
-            {verifyBusy ? "Verifying…" : "Verify"}
+            {forgotBusy ? "Sending reset link…" : "Forgot password?"}
           </button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
+
       {error ? <p className="install-progress__error">{error}</p> : null}
       {success && !error ? (
         <p className="paywall__auth-success paywall__auth-reveal">{success}</p>

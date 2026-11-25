@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -10,15 +10,14 @@ function renderForm(overrides: Partial<React.ComponentProps<typeof AuthCodeForm>
     email: "",
     onEmailChange: vi.fn(),
     emailValid: false,
-    code: "",
-    onCodeChange: vi.fn(),
-    codeRequested: false,
-    requestBusy: false,
-    verifyBusy: false,
+    password: "",
+    onPasswordChange: vi.fn(),
+    mode: "login",
+    onModeChange: vi.fn(),
+    submitBusy: false,
     error: null,
     success: null,
-    onRequestCode: vi.fn(),
-    onVerify: vi.fn(),
+    onSubmit: vi.fn(),
     ...overrides
   };
 
@@ -27,64 +26,79 @@ function renderForm(overrides: Partial<React.ComponentProps<typeof AuthCodeForm>
 }
 
 describe("AuthCodeForm", () => {
-  it("renders the email step and only enables sending for a valid idle email", async () => {
-    const props = renderForm({ email: "person@example.com", emailValid: true });
+  it("renders email and password and submits login", async () => {
+    const props = renderForm({ email: "person@example.com", emailValid: true, password: "s3cret!" });
 
-    expect(screen.getByText("Sign in to continue")).toBeInTheDocument();
     await userEvent.type(screen.getByPlaceholderText("you@example.com"), "x");
-    await userEvent.click(screen.getByRole("button", { name: "Send code" }));
+    await userEvent.type(screen.getByPlaceholderText("Password"), "y");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
     expect(props.onEmailChange).toHaveBeenLastCalledWith("person@example.comx");
-    expect(props.onRequestCode).toHaveBeenCalledTimes(1);
-    expect(screen.queryByPlaceholderText("6-digit code")).not.toBeInTheDocument();
+    expect(props.onPasswordChange).toHaveBeenLastCalledWith("s3cret!y");
+    expect(props.onSubmit).toHaveBeenCalledWith("login");
   });
 
-  it("blocks code requests when the email is invalid", () => {
-    renderForm();
-    expect(screen.getByRole("button", { name: "Send code" })).toBeDisabled();
+  it("blocks submit until email and password are present", () => {
+    renderForm({ email: "person@example.com", emailValid: true, password: "" });
+    const missingPassword = screen.getAllByRole("button", { name: "Sign in" }).pop()!;
+    expect(missingPassword).toBeDisabled();
+
+    // Separate render (fresh DOM) for the missing-email case.
+    cleanup();
+    renderForm({ email: "", emailValid: false, password: "s3cret!" });
+    const missingEmail = screen.getAllByRole("button", { name: "Sign in" }).pop()!;
+    expect(missingEmail).toBeDisabled();
   });
 
-  it("shows the sending state", () => {
-    renderForm({ email: "person@example.com", emailValid: true, requestBusy: true });
-    expect(screen.getByRole("button", { name: /Sending/ })).toBeDisabled();
+  it("shows the signing-in state", () => {
+    renderForm({ email: "person@example.com", emailValid: true, password: "s3cret!", submitBusy: true });
+    expect(screen.getByRole("button", { name: /Signing in/ })).toBeDisabled();
   });
 
-  it("renders the code step and verifies a non-blank code", async () => {
-    const props = renderForm({
-      codeRequested: true,
-      email: "person@example.com",
-      emailValid: true,
-      code: "123456"
-    });
+  it("switches to register mode and submits register", async () => {
+    const props = renderForm({ mode: "register", emailValid: true, password: "s3cret!" });
 
-    expect(screen.getByRole("button", { name: "Resend code" })).toBeEnabled();
-    await userEvent.type(screen.getByPlaceholderText("6-digit code"), "7");
-    await userEvent.click(screen.getByRole("button", { name: "Verify" }));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("tab", { name: "Register" }));
+    await user.click(screen.getByRole("button", { name: "Create account" }));
 
-    expect(props.onCodeChange).toHaveBeenLastCalledWith("1234567");
-    expect(props.onVerify).toHaveBeenCalledTimes(1);
+    // Clicking the toggle fires onModeChange; the parent flips `mode`.
+    expect(props.onModeChange).toHaveBeenCalledWith("register");
+    expect(props.onSubmit).toHaveBeenCalledWith("register");
   });
 
-  it("blocks verification while the code is blank", () => {
-    renderForm({ codeRequested: true, code: "   " });
-    expect(screen.getByRole("button", { name: "Verify" })).toBeDisabled();
+  it("shows the creating-account state", () => {
+    renderForm({ mode: "register", emailValid: true, password: "s3cret!", submitBusy: true });
+    expect(screen.getByRole("button", { name: /Creating account/ })).toBeDisabled();
   });
 
-  it("shows the verifying state", () => {
-    renderForm({ codeRequested: true, code: "123456", verifyBusy: true });
-    expect(screen.getByRole("button", { name: /Verifying/ })).toBeDisabled();
+  it("submits on Enter with the current mode", async () => {
+    const props = renderForm({ email: "person@example.com", emailValid: true, password: "s3cret!", mode: "register" });
+    await userEvent.type(screen.getByPlaceholderText("Password"), "{Enter}");
+    expect(props.onSubmit).toHaveBeenCalledWith("register");
+  });
+
+  it("calls the forgot-password handler when present", async () => {
+    const props = renderForm({ onForgotPassword: vi.fn(), forgotBusy: false });
+    await userEvent.click(screen.getByRole("button", { name: "Forgot password?" }));
+    expect(props.onForgotPassword).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the forgot-password busy state", () => {
+    renderForm({ onForgotPassword: vi.fn(), forgotBusy: true });
+    expect(screen.getByRole("button", { name: /Sending reset link/ })).toBeDisabled();
   });
 
   it("shows error before success", () => {
-    renderForm({ error: "That code expired", success: "Check your email" });
+    renderForm({ error: "Invalid login credentials", success: "Check your email" });
 
-    expect(screen.getByText("That code expired")).toBeInTheDocument();
+    expect(screen.getByText("Invalid login credentials")).toBeInTheDocument();
     expect(screen.queryByText("Check your email")).not.toBeInTheDocument();
   });
 
   it("shows success when there is no error", () => {
-    renderForm({ success: "Check your email" });
+    renderForm({ success: "Reset link sent" });
 
-    expect(screen.getByText("Check your email")).toBeInTheDocument();
+    expect(screen.getByText("Reset link sent")).toBeInTheDocument();
   });
 });
