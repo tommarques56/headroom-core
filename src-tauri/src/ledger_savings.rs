@@ -130,7 +130,7 @@ fn read_ledger(path: &PathBuf) -> LedgerRead {
         if let Some(day) = day.as_deref() {
             *by_source_day
                 .entry(day.to_string())
-                .or_insert_with(BTreeMap::new)
+                .or_default()
                 .entry(client.to_string())
                 .or_insert(0) += saved;
         }
