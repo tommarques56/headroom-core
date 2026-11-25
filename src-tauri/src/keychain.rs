@@ -84,7 +84,42 @@ mod platform {
 
     const ERR_SEC_ITEM_NOT_FOUND: OSStatus = -25300;
     const ERR_SEC_DUPLICATE_ITEM: OSStatus = -25299;
+    // errSecAuthFailed: the Security framework gave up on the DA/retry path,
+    // which is what macOS surfaces when the user dismisses/refuses the
+    // "Headroom wants to use your login keychain password" dialog. Callers
+    // poll the keychain (pricing status, device id) faster than the user can
+    // answer, so a refused prompt used to re-trigger that dialog forever.
+    const ERR_SEC_AUTH_FAILED: OSStatus = -25293;
+    // errSecInteractionNotAllowed: keychain locked / UI not allowed.
+    const ERR_SEC_INTERACTION_NOT_ALLOWED: OSStatus = -25308;
     const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// When a read hits an auth/interaction failure (user refused the prompt,
+    /// keychain locked), remember the instant so callers polling in a loop are
+    /// short-circuited instead of retriggering the macOS dialog until they
+    /// exhaust the retry budget. 0 = not in cooldown.
+    static AUTH_FAILURE_COOLDOWN_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+    fn in_auth_cooldown() -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let until = AUTH_FAILURE_COOLDOWN_UNTIL.load(Ordering::Relaxed);
+        until != 0 && now < until
+    }
+
+    fn stamp_auth_cooldown() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        // 60s: long enough that a polling loop can't hammer the Security UI,
+        // short enough that a good sign-in can recover quickly.
+        AUTH_FAILURE_COOLDOWN_UNTIL.store(now + 60_000, Ordering::Relaxed);
+    }
 
     #[repr(C)]
     struct CFDictionaryCallBacks([u8; 0]);
@@ -169,6 +204,17 @@ mod platform {
     }
 
     pub fn read_secret(service: &str, account: &str) -> Result<Option<String>, String> {
+        // Short-circuit a polling caller during the cooldown instead of
+        // retriggering the "wants to use your login keychain password" sheet
+        // every poll. The stored secret is not readable while it is pending,
+        // so failing identical to the refused case is the honest answer.
+        if in_auth_cooldown() {
+            return Err(
+                "macOS is waiting on keychain authorization (prompt was refused or is \
+                 pending); suppressed retry to avoid prompting again"
+                    .to_string(),
+            );
+        }
         unsafe {
             let svc = cf_string(service);
             let acc = cf_string(account);
@@ -201,6 +247,13 @@ mod platform {
             let status = SecItemCopyMatching(query, &mut result);
             CFRelease(query);
 
+            // A refused/unavailable keychain must not loop: mark the cooldown
+            // so every subsequent read (pricing poll, device id, …) fails fast
+            // without popping the system dialog again.
+            if status == ERR_SEC_AUTH_FAILED || status == ERR_SEC_INTERACTION_NOT_ALLOWED {
+                stamp_auth_cooldown();
+                return Err(prefixed_status_message(status, "read keychain secret"));
+            }
             if status == ERR_SEC_ITEM_NOT_FOUND {
                 return Ok(None);
             }
@@ -228,6 +281,15 @@ mod platform {
         secret: &str,
         allow_retry: bool,
     ) -> Result<(), String> {
+        // Same guard as read_secret: an update+add both hit the login keychain,
+        // so don't keep re-soliciting a refused keychain during the cooldown.
+        if in_auth_cooldown() {
+            return Err(
+                "macOS is waiting on keychain authorization (prompt was refused or is \
+                 pending); suppressed write to avoid prompting again"
+                    .to_string(),
+            );
+        }
         unsafe {
             let query = base_query(service, account);
             let data = CFDataCreate(std::ptr::null(), secret.as_ptr(), secret.len() as CFIndex);
@@ -246,6 +308,10 @@ mod platform {
             CFRelease(data);
             CFRelease(query);
 
+            if status == ERR_SEC_AUTH_FAILED || status == ERR_SEC_INTERACTION_NOT_ALLOWED {
+                stamp_auth_cooldown();
+                return check_status(status, "update keychain secret");
+            }
             if status != ERR_SEC_ITEM_NOT_FOUND {
                 return check_status(status, "update keychain secret");
             }
@@ -286,17 +352,30 @@ mod platform {
                         .to_string(),
                 );
             }
+            if add_status == ERR_SEC_AUTH_FAILED || add_status == ERR_SEC_INTERACTION_NOT_ALLOWED {
+                stamp_auth_cooldown();
+            }
             check_status(add_status, "write keychain secret")
         }
     }
 
     pub fn delete_secret(service: &str, account: &str) -> Result<(), String> {
         unsafe {
+            if in_auth_cooldown() {
+                return Err(
+                    "macOS is waiting on keychain authorization (prompt was refused or is \
+                     pending); suppressed delete to avoid prompting again"
+                        .to_string(),
+                );
+            }
             let query = base_query(service, account);
             let status = SecItemDelete(query);
             CFRelease(query);
             if status == ERR_SEC_ITEM_NOT_FOUND {
                 return Ok(());
+            }
+            if status == ERR_SEC_AUTH_FAILED || status == ERR_SEC_INTERACTION_NOT_ALLOWED {
+                stamp_auth_cooldown();
             }
             check_status(status, "delete keychain secret")
         }
@@ -306,6 +385,10 @@ mod platform {
         if status == 0 {
             return Ok(());
         }
+        Err(prefixed_status_message(status, action))
+    }
+
+    fn prefixed_status_message(status: OSStatus, action: &str) -> String {
         // The common failure codes on managed (MDM) or locked-down machines
         // get a hint the user can act on — a bare "status -25308" was the
         // whole error message people saw at sign-in.
@@ -318,9 +401,7 @@ mod platform {
             -34018 => " This build is missing a keychain entitlement. Reinstalling Headroom usually fixes this.",
             _ => "",
         };
-        Err(format!(
-            "{action} failed with macOS Security status {status}.{hint}"
-        ))
+        format!("{action} failed with macOS Security status {status}.{hint}")
     }
 }
 
@@ -438,6 +519,41 @@ pub fn delete_secret(service: &str, account: &str) -> Result<(), String> {
     platform::delete_secret(service, account)
 }
 
+/// One-shot cleanup for the "macOS asks for the login keychain password in a
+/// loop" bug (0.9.71-era): TCC/ACL entries created under the previous ad-hoc
+/// signature did not include the now-signed bundle, so every read re-triggered
+/// the Security prompt and a refused answer made the next poll ask again.
+///
+/// Deleting the item makes the app recreate it under the current signature on
+/// the next write, which matches the signed binary and no longer prompts. The
+/// only cost is that the caller must re-authenticate once (session token).
+///
+/// Runs once per version change (see `snapshot_state_on_version_change`); the
+/// caller gates this on that one-time hook, so upgrades land on the fix
+/// automatically and users who never hit the bug are unaffected beyond a
+/// single forced re-login per upgrade.
+pub fn purge_stale_signature_items() -> Vec<String> {
+    let mut purged = Vec::new();
+    for (service, account) in [
+        // headroom-pricing session token.
+        ("com.extraheadroom.headroom.account", "session-token"),
+        // upstream_override tokens (auth-token, replaced).
+        ("com.extraheadroom.headroom.upstream", "auth-token"),
+        ("com.extraheadroom.headroom.upstream", "replaced-auth-token"),
+        // device machine-id digest (recomputable via sha256(hardware uuid)).
+        ("com.extraheadroom.headroom.device", "machine-id-digest"),
+    ] {
+        match delete_secret(service, account) {
+            Ok(()) => purged.push(format!("{service}/{account}")),
+            Err(err) => log::info!(
+                "keychain migration: skipping {service}/{account} (not present or \
+                 unreadable: {err})"
+            ),
+        }
+    }
+    purged
+}
+
 #[cfg(all(test, debug_assertions))]
 mod tests {
     use std::ffi::OsString;
@@ -550,5 +666,34 @@ mod tests {
             super::read_secret(&service, "account").expect("read should succeed"),
             None
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn purge_stale_signature_items_deletes_known_services() {
+        let _home = TestHome::new();
+        // Plant the known stale services, then purge and confirm they're gone.
+        for (service, account) in [
+            ("com.extraheadroom.headroom.account", "session-token"),
+            ("com.extraheadroom.headroom.upstream", "auth-token"),
+            ("com.extraheadroom.headroom.upstream", "replaced-auth-token"),
+            ("com.extraheadroom.headroom.device", "machine-id-digest"),
+        ] {
+            super::write_secret(service, account, "stale-value").expect("write stale");
+        }
+        let purged = super::purge_stale_signature_items();
+        assert_eq!(purged.len(), 4, "all four known services should be purged");
+        for (service, account) in [
+            ("com.extraheadroom.headroom.account", "session-token"),
+            ("com.extraheadroom.headroom.upstream", "auth-token"),
+            ("com.extraheadroom.headroom.upstream", "replaced-auth-token"),
+            ("com.extraheadroom.headroom.device", "machine-id-digest"),
+        ] {
+            assert_eq!(
+                super::read_secret(service, account).expect("read after purge"),
+                None,
+                "{service}/{account} should be gone after purge"
+            );
+        }
     }
 }

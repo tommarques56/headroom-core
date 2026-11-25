@@ -8460,7 +8460,27 @@ pub fn run() {
     // Raw pre-upgrade snapshot of the user-state files, before AppState::new
     // can parse (and a schema change silently reset) any of them. See check 14
     // of docs/beta-smoke-test.md.
-    storage::snapshot_state_on_version_change(&storage::app_data_dir(), env!("CARGO_PKG_VERSION"));
+    let version_changed = storage::snapshot_state_on_version_change(
+        &storage::app_data_dir(),
+        env!("CARGO_PKG_VERSION"),
+    );
+    // One-shot keychain migration on the first launch of a new version:
+    // stale login-keychain items created by a previous app signature carry an
+    // ACL the signed build no longer matches, so every read re-triggered the
+    // macOS "wants to use your login keychain password" sheet (and a refused
+    // prompt retried forever via pricing polls). Purging them makes the app
+    // recreate entries under the current signature — no more password prompts.
+    if version_changed {
+        let purged = crate::keychain::purge_stale_signature_items();
+        if !purged.is_empty() {
+            log::info!(
+                "keychain migration: purged {} stale item(s) on first {v} launch: {}",
+                purged.len(),
+                purged.join(", "),
+                v = env!("CARGO_PKG_VERSION")
+            );
+        }
+    }
 
     // Did the restart that led here actually relaunch us, or did the user have
     // to open the app themselves? Only this launch can tell.

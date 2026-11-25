@@ -81,14 +81,18 @@ const PRE_UPDATE_SNAPSHOT_FILES: [&str; 3] = [
 /// `meta.json` naming the from/to versions), and the stamp is rewritten
 /// LAST, so a crash mid-snapshot re-runs it on the next launch while the
 /// state files are still untouched.
-pub fn snapshot_state_on_version_change(base_dir: &Path, current_version: &str) {
+///
+/// Returns `true` when this launch is the first run of `current_version`
+/// (i.e. a version change was detected and a snapshot was attempted), which
+/// callers use to run one-shot migration hooks.
+pub fn snapshot_state_on_version_change(base_dir: &Path, current_version: &str) -> bool {
     let stamp_path = config_file(base_dir, "last-run-version");
     let last_version = std::fs::read_to_string(&stamp_path)
         .map(|v| v.trim().to_string())
         .ok()
         .filter(|v| !v.is_empty());
     if last_version.as_deref() == Some(current_version) {
-        return;
+        return false;
     }
     let snapshot_dir = base_dir.join("config").join("pre-update");
     if let Err(err) = std::fs::create_dir_all(&snapshot_dir) {
@@ -107,7 +111,7 @@ pub fn snapshot_state_on_version_change(base_dir: &Path, current_version: &str) 
             "pre-update snapshot: cannot create {}: {err}{note}",
             snapshot_dir.display()
         );
-        return;
+        return true;
     }
     for name in PRE_UPDATE_SNAPSHOT_FILES {
         let source = config_file(base_dir, name);
@@ -142,6 +146,7 @@ pub fn snapshot_state_on_version_change(base_dir: &Path, current_version: &str) 
             "pre-update snapshot: state from {from} saved before first {current_version} launch"
         );
     }
+    true
 }
 
 /// Written just before an update-restart tears the app down, cleared by the
