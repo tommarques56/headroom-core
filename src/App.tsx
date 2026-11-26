@@ -6678,7 +6678,6 @@ export default function App() {
     return [...topProjects, pinnedClaudeProject];
   })();
   const hiddenClaudeProjectsCount = sortedClaudeProjects.length - visibleClaudeProjects.length;
-  const trialDaysRemaining = formatRemainingDays(pricingStatus?.account?.trialEndsAt);
   const localGraceHoursRemaining = (() => {
     const target = pricingStatus?.localGraceEndsAt
       ? new Date(pricingStatus.localGraceEndsAt).getTime()
@@ -6783,16 +6782,6 @@ export default function App() {
     const { percentOff, durationMonths } = pricingStatus.introOffer;
     return `Intro offer: ${percentOff}% off your first ${durationMonths} months.`;
   })();
-  // The same offer during the trial, once it has saved something: before the
-  // wall a trial user only met the offer by opening Upgrade themselves.
-  const trialOfferLine =
-    !inUpgradeMoment &&
-    pricingStatus?.account?.trialActive &&
-    !pricingStatus.account.subscriptionActive &&
-    pricingStatus.introOffer?.active &&
-    trialSavedLabel
-      ? `Intro offer: ${pricingStatus.introOffer.percentOff}% off your first ${pricingStatus.introOffer.durationMonths} months.`
-      : null;
   // When the banner is carrying an upgrade nudge (and isn't showing the Resume
   // control), let clicking the card jump straight to the upgrade view.
   const calloutIsUpgradeNudge =
@@ -6868,17 +6857,9 @@ export default function App() {
         ? `${tierLabel}, AppSumo lifetime`
         : tierLabel;
     }
-    if (pricingStatus.account.trialActive) {
-      const usageDaysLeft = pricingStatus.account.trialUsageDaysLeft;
-      if (usageDaysLeft != null) {
-        return `${usageDaysLeft} day${usageDaysLeft === 1 ? "" : "s"} of use left in trial`;
-      }
-      if (trialDaysRemaining != null) {
-        return `${trialDaysRemaining} day${trialDaysRemaining === 1 ? "" : "s"} left in trial`;
-      }
-      return "Free trial";
-    }
-    return "Trial expired";
+    // Headroom is free for every signed-in account: no trial countdown, no
+    // "expired" state.
+    return "Free";
   })();
   const upgradeTrialCallout = (() => {
     if (pricingBusy && !pricingStatus) {
@@ -6928,30 +6909,19 @@ export default function App() {
       };
     }
     if (pricingStatus.account?.trialActive) {
-      // Usage-day trials count saving days, so "3 more days of use" is the
-      // honest label; calendar trials keep the countdown.
-      const usageDaysLeft = pricingStatus.account.trialUsageDaysLeft;
-      const daysLabel =
-        trialDaysRemaining != null
-          ? `${trialDaysRemaining} day${trialDaysRemaining === 1 ? "" : "s"}`
-          : "7 days";
+      // Headroom is free for every signed-in account: the trial window carries
+      // no expiration, so there is no countdown and no upgrade CTA.
       return {
-        tone: "warning" as const,
+        tone: "healthy" as const,
         message:
           (trialSavedLabel ? `${trialSavedLabel} ` : "") +
-          (usageDaysLeft != null
-            ? `${usageDaysLeft} more day${usageDaysLeft === 1 ? "" : "s"} of use left in your trial. Upgrade to continue using Headroom without limits.`
-            : `${daysLabel} of trial to go. Upgrade to continue using Headroom without limits.`),
-        actionLabel: "Upgrade",
-        onAction: () => void handleUpgradeAction(upgradeDefaultPlanId)
+          "Your account is active — Headroom keeps optimizing every prompt, free and unlimited.",
       };
     }
     const unsaved = unsavedWhileBlockedLabel(gatedBypassBytes, dashboard.dailySavings);
     return {
-      tone: "expired" as const,
-      message: `Your trial has ended.${trialSavedLabel ? ` ${trialSavedLabel}` : ""}${unsaved ? ` ${unsaved}` : ""} Upgrade to keep Headroom optimizing your prompts.`,
-      actionLabel: "Upgrade",
-      onAction: () => void handleUpgradeAction(upgradeDefaultPlanId)
+      tone: "healthy" as const,
+      message: `Your account is active — Headroom keeps optimizing every prompt, free and unlimited.${unsaved ? ` ${unsaved}` : ""}`,
     };
   })();
   const pricingAuthCard = (
@@ -7343,17 +7313,6 @@ export default function App() {
                   // Nothing has ever been saved on this install, so the
                   // reassuring "check back later" below would be a lie.
                   <p className="callout-banner__subtitle">{stallBannerLine}</p>
-                ) : calloutBanner.tone === "healthy" && trialOfferLine ? (
-                  <p className="callout-banner__subtitle">
-                    {trialOfferLine}{" "}
-                    <button
-                      type="button"
-                      className="link-button"
-                      onClick={() => setActiveView("upgrade")}
-                    >
-                      See plans
-                    </button>
-                  </p>
                 ) : calloutBanner.tone === "healthy" &&
                   dashboard.lifetimeEstimatedTokensSaved < 1_000_000 ? (
                   <p className="callout-banner__subtitle">Use your AI coding agents as normal, and check back later to see what Headroom is saving you.</p>
