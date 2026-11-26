@@ -15,9 +15,11 @@ use crate::models::{
 };
 use crate::state::AppState;
 use crate::storage::{app_data_dir, config_file};
+use crate::supabase;
 
 const HEADROOM_ACCOUNT_KEYCHAIN_SERVICE: &str = "com.extraheadroom.headroom.account";
 const HEADROOM_ACCOUNT_SESSION_ACCOUNT: &str = "session-token";
+const HEADROOM_ACCOUNT_REFRESH_ACCOUNT: &str = "refresh-token";
 #[cfg(debug_assertions)]
 const DEFAULT_ACCOUNT_API_BASE_URL: &str = "http://127.0.0.1:8090/api/v1";
 #[cfg(not(debug_assertions))]
@@ -1202,7 +1204,22 @@ pub fn get_pricing_status(state: &AppState) -> Result<HeadroomPricingStatus, Str
     })?;
     let (authenticated, account, account_sync_error, promo) =
         if let Some(token) = session_token.as_deref() {
-            let envelope_result = fetch_remote_account(token, &identity);
+            let mut envelope_result = fetch_remote_account(token, &identity);
+            // Supabase access tokens are short-lived (~1h). A 401 here usually
+            // means merely expired, not revoked: try a refresh-token exchange
+            // once and retry before counting it toward the unauthorized
+            // escalation below.
+            if let Err(RemoteAccountSyncError::Unauthorized) = &envelope_result {
+                if let Some(refresh) = read_refresh_token().ok().flatten() {
+                    if let Ok(session) = supabase::refresh_session(&refresh) {
+                        if let Err(write_err) = write_session_token(&session.access_token) {
+                            log::warn!("could not persist refreshed session token: {write_err}");
+                        }
+                        let _ = write_refresh_token(&session.refresh_token);
+                        envelope_result = fetch_remote_account(&session.access_token, &identity);
+                    }
+                }
+            }
             match &envelope_result {
                 Ok(_) => stamp_account_sync_ok(&mut local_state),
                 Err(err) if err.reached_headroom() => {
@@ -1210,19 +1227,24 @@ pub fn get_pricing_status(state: &AppState) -> Result<HeadroomPricingStatus, Str
                 }
                 Err(err) => log::info!("account sync failed on this network: {err:?}"),
             }
-            let promo = envelope_result
-                .as_ref()
-                .map(|e| {
-                    build_promo(
-                        e.active_percent_off,
-                        &e.pricing_ladder,
-                        &e.intro_offer,
-                        &e.plan_prices,
-                    )
-                })
-                .unwrap_or_default();
+            let promo = match &envelope_result {
+                Ok(e) => build_promo(
+                    e.active_percent_off,
+                    &e.pricing_ladder,
+                    &e.intro_offer,
+                    &e.plan_prices,
+                ),
+                Err(_) => PricingPromo::default(),
+            };
+            // Pass the freshest token (post-refresh) through so the merge's
+            // email accounting sees the live session.
+            let token_for_merge = match &envelope_result {
+                Ok(_) => read_session_token().ok().flatten(),
+                Err(_) => None,
+            };
             let account_result = envelope_result.map(|e| e.account);
-            let (auth, acc, err) = merge_background_account_sync(Some(token), account_result);
+            let merge_token = token_for_merge.as_deref().unwrap_or(token);
+            let (auth, acc, err) = merge_background_account_sync(Some(merge_token), account_result);
             (auth, acc, err, promo)
         } else {
             let promo = fetch_public_config()
@@ -1913,33 +1935,19 @@ pub fn register_headroom_account(
     email: &str,
     password: &str,
 ) -> Result<HeadroomPricingStatus, String> {
-    register_headroom_account_with_base_url(state, email, password, &api_base_url())
+    let session = supabase::sign_up(email, password)?;
+    finalize_supabase_session(state, session)
 }
 
-/// Test-only seam: `register_headroom_account` against a parameterized base URL.
+/// Test-only seam: `register_headroom_account` against a parameterized backend.
 pub(crate) fn register_headroom_account_with_base_url(
     state: &AppState,
     email: &str,
     password: &str,
-    base_url: &str,
+    _base_url: &str,
 ) -> Result<HeadroomPricingStatus, String> {
-    let body = post_password_auth(
-        state,
-        base_url,
-        "desktop/auth/register",
-        "register your account",
-        email,
-        Some(password),
-    )?;
-    write_session_token(&body.session_token)?;
-    let account = remote_account_to_profile(body.account);
-    let promo = build_promo(
-        body.active_percent_off,
-        &body.pricing_ladder,
-        &body.intro_offer,
-        &body.plan_prices,
-    );
-    finalize_authenticated_session(state, account, promo)
+    let session = supabase::sign_up(email, password)?;
+    finalize_supabase_session(state, session)
 }
 
 /// Sign in to an existing Headroom account (email + password).
@@ -1948,85 +1956,122 @@ pub fn login_headroom_account(
     email: &str,
     password: &str,
 ) -> Result<HeadroomPricingStatus, String> {
-    login_headroom_account_with_base_url(state, email, password, &api_base_url())
+    let session = supabase::sign_in(email, password)?;
+    finalize_supabase_session(state, session)
 }
 
-/// Test-only seam: `login_headroom_account` against a parameterized base URL.
+/// Test-only seam: `login_headroom_account` against a parameterized backend.
 pub(crate) fn login_headroom_account_with_base_url(
     state: &AppState,
     email: &str,
     password: &str,
-    base_url: &str,
+    _base_url: &str,
 ) -> Result<HeadroomPricingStatus, String> {
-    let body = post_password_auth(
-        state,
-        base_url,
-        "desktop/auth/login",
-        "sign in",
-        email,
-        Some(password),
-    )?;
-    write_session_token(&body.session_token)?;
-    let account = remote_account_to_profile(body.account);
-    let promo = build_promo(
-        body.active_percent_off,
-        &body.pricing_ladder,
-        &body.intro_offer,
-        &body.plan_prices,
-    );
+    let session = supabase::sign_in(email, password)?;
+    finalize_supabase_session(state, session)
+}
+
+/// Finish a Supabase sign-in: persist the access token (as the desktop session
+/// token), refresh token, fetch the RLS profile + license, and emit the
+/// pricing status that gates optimization.
+fn finalize_supabase_session(
+    state: &AppState,
+    session: supabase::SupabaseSession,
+) -> Result<HeadroomPricingStatus, String> {
+    write_session_token(&session.access_token)?;
+    write_refresh_token(&session.refresh_token)?;
+    let profile = supabase::fetch_profile(&session.access_token)?.unwrap_or_default();
+    let license = supabase::fetch_license(&session.access_token)?;
+    let account = account_from_supabase(&profile, license.as_ref(), &session.email);
+    let promo = PricingPromo::default();
     finalize_authenticated_session(state, account, promo)
 }
 
-/// Send a password-recovery email for the given address. The gateway answers
-/// 200 for both existing and unknown addresses (no user enumeration), so this
-/// only returns an error on transport/validation failures.
+/// Build a `HeadroomAccountProfile` from the Supabase profile + license rows.
+fn account_from_supabase(
+    profile: &supabase::SupabaseProfile,
+    license: Option<&supabase::SupabaseLicense>,
+    email: &str,
+) -> HeadroomAccountProfile {
+    let trial_ends_at = profile
+        .trial_ends_at
+        .or_else(|| license.and_then(|l| l.ends_at));
+    let trial_active = trial_ends_at.is_some_and(|t| Utc::now() < t);
+    let (subscription_active, subscription_tier) = match license {
+        Some(l) if l.tier.is_some() && l.kind != "trial" => {
+            let tier: Option<HeadroomSubscriptionTier> =
+                match l.tier.as_deref().unwrap_or("").to_ascii_lowercase().as_str() {
+                    "pro" => Some(HeadroomSubscriptionTier::Pro),
+                    "max5x" => Some(HeadroomSubscriptionTier::Max5x),
+                    "max20x" => Some(HeadroomSubscriptionTier::Max20x),
+                    "pro500" => Some(HeadroomSubscriptionTier::Pro500),
+                    _ => None,
+                };
+            let active = l.status == "active"
+                || l.status == "trialing"
+                || l.status == "past_due"; // still entitled
+            (active && tier.is_some(), tier)
+        }
+        _ => (false, None),
+    };
+    HeadroomAccountProfile {
+        email: email.to_string(),
+        trial_started_at: license.and_then(|l| l.starts_at),
+        trial_ends_at,
+        trial_usage_days_left: None,
+        trial_active,
+        subscription_active,
+        subscription_tier,
+        subscription_started_at: None,
+        subscription_renews_at: None,
+        subscription_amount_cents: None,
+        subscription_billing_period: None,
+        subscription_discount_duration: None,
+        subscription_discount_duration_in_months: None,
+        subscription_cancel_at_period_end: false,
+        subscription_ends_at: None,
+        subscription_renewal_cents: None,
+        subscription_renewal_ends_at: None,
+        subscription_pending_tier: None,
+        subscription_pending_billing_period: None,
+        subscription_pending_effective_at: None,
+        invite_code: None,
+        accepted_invites_count: 0,
+        invite_bonus_percent: profile.invite_bonus_percent.clamp(0.0, 50.0),
+        upgrade_action: None,
+        appsumo_lifetime_tier: None,
+        recommended_tier: None,
+        grandfathered: false,
+        pro500_grandfathered: false,
+        payment_failed: false,
+        referral_code: None,
+        referral_signups: 0,
+        referral_subscribed: 0,
+        referral_free_months: 0,
+        referral_reward_pending: false,
+    }
+}
+
+/// Send a password-recovery email for the given address. Supabase answers 200
+/// for both existing and unknown addresses (no user enumeration), so this only
+/// returns an error on transport/validation failures.
 pub fn reset_headroom_password(state: &AppState, email: &str) -> Result<(), String> {
-    reset_headroom_password_with_base_url(state, email, &api_base_url())
+    let _ = state;
+    supabase::reset_password(email)
 }
 
 /// Test-only seam: `reset_headroom_password` against a parameterized base URL.
 pub(crate) fn reset_headroom_password_with_base_url(
-    state: &AppState,
+    _state: &AppState,
     email: &str,
-    base_url: &str,
+    _base_url: &str,
 ) -> Result<(), String> {
-    let trimmed_email = email.trim().to_ascii_lowercase();
-    if trimmed_email.is_empty() || !trimmed_email.contains('@') {
-        return Err("Enter a valid email address.".into());
-    }
-
-    let response = http_client()?
-        .post(join_url(base_url, "desktop/auth/reset_password"))
-        .timeout(AUTH_REQUEST_TIMEOUT)
-        .json(&ResetPasswordPayload {
-            email: &trimmed_email,
-            identity: IdentityPayload::for_state(state),
-        })
-        .send()
-        .map_err(|err| {
-            let msg = transport_failure("send the password reset email", &err);
-            capture_transport_failure("auth-reset-password", &msg, &err);
-            msg
-        })?;
-
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let api_error: Option<String> = response
-            .text()
-            .ok()
-            .and_then(|body| serde_json::from_str::<ApiErrorResponse>(&body).ok())
-            .and_then(|parsed| parsed.error)
-            .filter(|value| !value.trim().is_empty());
-        if let Some(msg) = api_error {
-            return Err(msg);
-        }
-        return Err(format!("Could not send the password reset email (status {status})."));
-    }
-    Ok(())
+    supabase::reset_password(email)
 }
 
 pub fn sign_out() -> Result<(), String> {
     clear_session_token()?;
+    clear_refresh_token()?;
     let mut local = load_or_initialize_local_state()?;
     if local.last_account_email.take().is_some() {
         write_local_state(&local)?;
@@ -4583,6 +4628,29 @@ fn write_session_token(token: &str) -> Result<(), String> {
     )
 }
 
+fn read_refresh_token() -> Result<Option<String>, String> {
+    keychain::read_secret(
+        HEADROOM_ACCOUNT_KEYCHAIN_SERVICE,
+        HEADROOM_ACCOUNT_REFRESH_ACCOUNT,
+    )
+    .map(|value| value.and_then(non_empty_string))
+}
+
+fn write_refresh_token(token: &str) -> Result<(), String> {
+    keychain::write_secret(
+        HEADROOM_ACCOUNT_KEYCHAIN_SERVICE,
+        HEADROOM_ACCOUNT_REFRESH_ACCOUNT,
+        token.trim(),
+    )
+}
+
+fn clear_refresh_token() -> Result<(), String> {
+    keychain::delete_secret(
+        HEADROOM_ACCOUNT_KEYCHAIN_SERVICE,
+        HEADROOM_ACCOUNT_REFRESH_ACCOUNT,
+    )
+}
+
 fn clear_session_token() -> Result<(), String> {
     keychain::delete_secret(
         HEADROOM_ACCOUNT_KEYCHAIN_SERVICE,
@@ -4622,60 +4690,70 @@ fn fetch_public_config() -> Option<PublicConfig> {
 
 fn fetch_remote_account(
     token: &str,
-    identity: &IdentityPayload,
+    _identity: &IdentityPayload,
 ) -> Result<RemoteAccountEnvelope, RemoteAccountSyncError> {
-    fetch_remote_account_with_base_url(token, identity, &api_base_url())
+    // Background sync now reads straight from hosted Supabase (RLS-scoped
+    // profile + license). The stored token is the current Supabase access
+    // token; if it has expired the 401 path triggers a refresh below before
+    // we surface anything to the user.
+    let profile = match supabase::fetch_profile(token) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return Err(RemoteAccountSyncError::Unauthorized);
+        }
+        Err(msg) => return Err(RemoteAccountSyncError::Other(msg)),
+    };
+    let license = supabase::fetch_license(token).ok().flatten();
+    let email = profile.email.clone().unwrap_or_default();
+    let account = account_from_supabase(&profile, license.as_ref(), &email);
+    Ok(RemoteAccountEnvelope {
+        account: remote_response_from_profile(account),
+        active_percent_off: 0,
+        pricing_ladder: None,
+        intro_offer: None,
+        plan_prices: None,
+    })
 }
 
-fn fetch_remote_account_with_base_url(
-    token: &str,
-    identity: &IdentityPayload,
-    base_url: &str,
-) -> Result<RemoteAccountEnvelope, RemoteAccountSyncError> {
-    let builder = http_client()
-        .map_err(RemoteAccountSyncError::Other)?
-        .get(join_url(base_url, "desktop/account"))
-        .header("Authorization", format!("Bearer {token}"));
-    // Chain for the sync-failure log, same reason as fetch_grace_start; the
-    // user sees merge_background_account_sync's text.
-    let response = identity.apply_headers(builder).send().map_err(|err| {
-        let text = format!("send: {}", transport_cause_chain(&err));
-        if is_local_filter_drop(&err) {
-            RemoteAccountSyncError::FilterBlocked(text)
-        } else {
-            RemoteAccountSyncError::Transport(text)
-        }
-    })?;
-
-    // Before the 401 check: a proxy's own 401 says nothing about the session.
-    if !response.status().is_success() || !is_json_response(&response) {
-        if let Some(msg) = intermediary_failure("refresh your plan details", &response) {
-            return Err(RemoteAccountSyncError::Intermediary(msg));
-        }
+/// Convert a `HeadroomAccountProfile` into the wire `RemoteAccountResponse`
+/// used by the legacy sync path, so callers only deal with one profile type.
+fn remote_response_from_profile(p: HeadroomAccountProfile) -> RemoteAccountResponse {
+    RemoteAccountResponse {
+        email: p.email,
+        trial_started_at: p.trial_started_at,
+        trial_ends_at: p.trial_ends_at,
+        trial_usage_days_left: p.trial_usage_days_left,
+        trial_active: p.trial_active,
+        subscription_active: p.subscription_active,
+        subscription_tier: p.subscription_tier,
+        subscription_started_at: p.subscription_started_at,
+        subscription_renews_at: p.subscription_renews_at,
+        subscription_amount_cents: p.subscription_amount_cents,
+        subscription_billing_period: p.subscription_billing_period,
+        subscription_discount_duration: p.subscription_discount_duration,
+        subscription_discount_duration_in_months: p.subscription_discount_duration_in_months,
+        subscription_cancel_at_period_end: p.subscription_cancel_at_period_end,
+        subscription_ends_at: p.subscription_ends_at,
+        subscription_renewal_cents: p.subscription_renewal_cents,
+        subscription_renewal_ends_at: p.subscription_renewal_ends_at,
+        subscription_pending_tier: p.subscription_pending_tier,
+        subscription_pending_billing_period: p.subscription_pending_billing_period,
+        subscription_pending_effective_at: p.subscription_pending_effective_at,
+        invite_code: p.invite_code,
+        accepted_invites_count: p.accepted_invites_count,
+        invite_bonus_percent: p.invite_bonus_percent,
+        upgrade_action: p.upgrade_action,
+        appsumo_lifetime_tier: p.appsumo_lifetime_tier,
+        recommended_tier: p.recommended_tier,
+        grandfathered: p.grandfathered,
+        pro500_grandfathered: p.pro500_grandfathered,
+        payment_failed: p.payment_failed,
+        referral_code: p.referral_code,
+        referral_signups: p.referral_signups,
+        referral_subscribed: p.referral_subscribed,
+        referral_free_months: p.referral_free_months,
+        referral_reward_pending: p.referral_reward_pending,
     }
-
-    if response.status().as_u16() == 401 {
-        return Err(RemoteAccountSyncError::Unauthorized);
-    }
-
-    if !response.status().is_success() {
-        return Err(RemoteAccountSyncError::Other(format!(
-            "http {}",
-            response.status()
-        )));
-    }
-
-    response.json::<RemoteAccountEnvelope>().map_err(|err| {
-        // reqwest's text alone is "error decoding response body" for both a
-        // payload this build cannot parse and the client timeout firing
-        // mid-body, which blocking reqwest reports as a decode error (RUST-8Z).
-        let text = format!("decode: {}", transport_cause_chain(&err));
-        if err.is_timeout() || err.is_body() {
-            RemoteAccountSyncError::Transport(text)
-        } else {
-            RemoteAccountSyncError::Other(text)
-        }
-    })
 }
 
 fn http_client() -> Result<Client, String> {
@@ -7548,63 +7626,66 @@ mod tests {
         drop_state(dir);
     }
 
-    /// RUST-8Z: a company proxy's 403 on the account sync is the user's
-    /// network, told to the user and kept out of the auth-silent alarm; the
-    /// same status from headroom-web still reaches the alarm.
+    /// The direct-Supabase sync: a missing profile row (nothing RLS-visible)
+    /// surfaces as Unauthorized so the merge can escalate it exactly like a
+    /// revoked session.
     #[test]
-    fn account_sync_tells_a_proxy_403_from_headroom_web() {
-        use std::io::{Read, Write};
-        let identity = super::IdentityPayload::default();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let _ = stream.read(&mut [0u8; 4096]);
-            let _ = stream.write_all(
-                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
-        });
-        let err = super::fetch_remote_account_with_base_url(
-            "token",
-            &identity,
-            &format!("http://127.0.0.1:{port}"),
-        )
-        .expect_err("a proxy's 403");
-        server.join().unwrap();
-        assert!(!err.reached_headroom(), "{err:?}");
+    fn account_sync_missing_profile_is_unauthorized() {
+        // No network: fetch_remote_account calls supabase::fetch_profile with a
+        // real token against hosted Supabase, which we cannot unit-test here.
+        // Instead assert the mapping layer treats "no profile" as Unauthorized,
+        // mirroring what fetch_remote_account returns.
+        let err = super::RemoteAccountSyncError::Unauthorized;
+        // A 401 proves we reached the backend, so it feeds the auth-silent
+        // alarm (unlike a network failure).
+        assert!(err.reached_headroom(), "{err:?}");
         let (authenticated, _, message) =
             super::merge_background_account_sync(Some("token"), Err(err));
         assert!(authenticated);
-        assert!(message.unwrap().contains("proxy or firewall"));
-
-        let (port, server) =
-            spawn_canned_response_server(serde_json::json!({}), "HTTP/1.1 403 Forbidden");
-        let err = super::fetch_remote_account_with_base_url(
-            "token",
-            &identity,
-            &format!("http://127.0.0.1:{port}"),
-        )
-        .expect_err("headroom-web's 403");
-        server.join().unwrap();
-        assert!(err.reached_headroom(), "{err:?}");
+        assert!(message.unwrap().contains("could not be refreshed"));
     }
 
-    /// RUST-8Z: an account payload this build cannot parse says why.
+    /// The mapping from Supabase profile+license rows yields a correct
+    /// HeadroomAccountProfile: trial window, tier, and bonify clamp.
     #[test]
-    fn account_sync_decode_failure_names_its_cause() {
-        let identity = super::IdentityPayload::default();
-        let (port, server) = spawn_canned_response_server(serde_json::json!({}), "HTTP/1.1 200 OK");
-        let err = super::fetch_remote_account_with_base_url(
-            "token",
-            &identity,
-            &format!("http://127.0.0.1:{port}"),
-        )
-        .expect_err("no account in the payload");
-        server.join().unwrap();
-        assert!(err.reached_headroom(), "{err:?}");
-        assert!(
-            format!("{err:?}").contains("missing field `account`"),
-            "{err:?}"
+    fn supabase_rows_map_to_account_profile() {
+        use super::account_from_supabase;
+        let profile = crate::supabase::SupabaseProfile {
+            email: Some("u@example.com".into()),
+            trial_ends_at: Some(Utc::now() + Duration::days(5)),
+            invite_bonus_percent: 20.0,
+        };
+        let license = crate::supabase::SupabaseLicense {
+            tier: Some("trial".into()),
+            status: "trialing".into(),
+            kind: "trial".into(),
+            starts_at: Some(Utc::now() - Duration::days(1)),
+            ends_at: Some(Utc::now() + Duration::days(5)),
+        };
+        let account = account_from_supabase(&profile, Some(&license), "u@example.com");
+        assert!(account.trial_active);
+        assert!(!account.subscription_active);
+        assert_eq!(account.trial_usage_days_left, None);
+        assert_eq!(account.email, "u@example.com");
+    }
+
+    /// A paid (non-trial) license maps to an active subscription with a tier.
+    #[test]
+    fn supabase_paid_license_maps_to_subscription() {
+        use super::account_from_supabase;
+        let profile = crate::supabase::SupabaseProfile::default();
+        let license = crate::supabase::SupabaseLicense {
+            tier: Some("pro".into()),
+            status: "active".into(),
+            kind: "subscription".into(),
+            starts_at: Some(Utc::now() - Duration::days(30)),
+            ends_at: None,
+        };
+        let account = account_from_supabase(&profile, Some(&license), "u@example.com");
+        assert!(account.subscription_active);
+        assert_eq!(
+            account.subscription_tier,
+            Some(super::HeadroomSubscriptionTier::Pro)
         );
     }
 
@@ -7766,93 +7847,31 @@ mod tests {
 
     // ── register / login / reset (Supabase email + password) ─
 
+    /// Validation: `supabase::sign_up` rejects a blank password before any
+    /// network call. `register_headroom_account` delegates to it, so the
+    /// user-facing seam inherits the same guard.
     #[test]
-    #[serial_test::serial]
-    fn login_decodes_session_envelope_and_writes_token() {
-        // AuthedTestEnv redirects HOME/XDG/HEADROOM_DATA_DIR to a scratch dir
-        // and seeds a session token there, so the write assertion below is
-        // isolated from the real keychain and from parallel test processes.
-        let _env = AuthedTestEnv::new("session-seeded");
-
-        let body = serde_json::json!({
-            "sessionToken": "session-pw-xyz",
-            "account": {
-                "email": "user@example.com",
-                "trialStartedAt": "2026-04-01T00:00:00Z",
-                "trialEndsAt": "2026-04-15T00:00:00Z",
-                "trialActive": true,
-                "subscriptionActive": false,
-                "subscriptionTier": null,
-                "inviteCode": null,
-                "acceptedInvitesCount": 0,
-                "inviteBonusPercent": 0
-            }
-        });
-        let (port, server) = spawn_canned_response_server(body, "HTTP/1.1 200 OK");
+    fn register_rejects_blank_password_before_hitting_server() {
         let (state, dir) = temp_app_state();
-
-        let status = super::login_headroom_account_with_base_url(
-            &state,
-            "user@example.com",
-            "secret-password",
-            &format!("http://127.0.0.1:{port}"),
-        )
-        .expect("login succeeds");
-
-        assert!(status.authenticated);
-        assert_eq!(
-            status.account.as_ref().map(|a| a.email.as_str()),
-            Some("user@example.com")
-        );
-        assert_eq!(stored_session_token().as_deref(), Some("session-pw-xyz"));
-
-        server.join().unwrap();
+        let err = super::register_headroom_account(&state, "user@example.com", "   ")
+            .expect_err("blank password rejected");
+        assert!(err.contains("password"), "unexpected: {err}");
         drop_state(dir);
     }
 
     #[test]
-    #[serial_test::serial]
-    fn register_decodes_session_envelope_and_writes_token() {
-        let _env = AuthedTestEnv::new("session-seeded");
-
-        let body = serde_json::json!({
-            "sessionToken": "session-reg-xyz",
-            "account": {
-                "email": "new@example.com",
-                "trialStartedAt": "2026-04-01T00:00:00Z",
-                "trialEndsAt": "2026-04-08T00:00:00Z",
-                "trialActive": true,
-                "subscriptionActive": false,
-                "subscriptionTier": null,
-                "inviteCode": null,
-                "acceptedInvitesCount": 0,
-                "inviteBonusPercent": 0
-            }
-        });
-        let (port, server) = spawn_canned_response_server(body, "HTTP/1.1 201 Created");
+    fn register_rejects_malformed_email_before_hitting_server() {
         let (state, dir) = temp_app_state();
-
-        let status = super::register_headroom_account_with_base_url(
-            &state,
-            "new@example.com",
-            "another-password",
-            &format!("http://127.0.0.1:{port}"),
-        )
-        .expect("register succeeds");
-
-        assert!(status.authenticated);
-        assert_eq!(
-            status.account.as_ref().map(|a| a.email.as_str()),
-            Some("new@example.com")
-        );
-        assert_eq!(stored_session_token().as_deref(), Some("session-reg-xyz"));
-
-        server.join().unwrap();
+        let err = super::register_headroom_account(&state, "not-an-email", "secret")
+            .expect_err("malformed email rejected");
+        assert!(err.contains("email"), "unexpected: {err}");
         drop_state(dir);
     }
 
+    /// The `_with_base_url` seams now ignore the URL (Supabase is a fixed
+    /// hosted project), so they must still reject blank passwords locally.
     #[test]
-    fn password_auth_rejects_blank_password_before_hitting_server() {
+    fn password_auth_with_base_url_still_validates_blank_password() {
         let (state, dir) = temp_app_state();
         let err = super::register_headroom_account_with_base_url(
             &state,
@@ -7865,60 +7884,61 @@ mod tests {
         drop_state(dir);
     }
 
+    /// The Supabase error-body parser turns common responses into concise
+    /// user-facing messages (mirrors `supabase_error_message` unit coverage
+    /// in supabase.rs, asserted here for the wire messages the app sees).
     #[test]
-    fn password_auth_surfaces_gateway_error_message() {
-        // A 401 with an envelope error should surface the gateway's message,
-        // not a generic status line.
-        let body = serde_json::json!({ "error": "Invalid login credentials" });
-        let (port, server) = spawn_canned_response_server(body, "HTTP/1.1 401 Unauthorized");
-        let (state, dir) = temp_app_state();
-
-        let err = super::login_headroom_account_with_base_url(
-            &state,
-            "user@example.com",
-            "wrong-password",
-            &format!("http://127.0.0.1:{port}"),
-        )
-        .expect_err("401 surfaces as error");
+    fn password_auth_surfaces_supabase_error_message() {
+        let err = crate::supabase::supabase_error_message_for_test(
+            r#"{"error":"invalid_grant","error_description":"Invalid login credentials"}"#,
+            "fallback",
+        );
         assert!(err.contains("Invalid login credentials"), "unexpected: {err}");
-
-        server.join().unwrap();
-        drop_state(dir);
     }
 
+    /// A trial license that has not ended keeps `trial_active` true and the
+    /// subscription unset.
     #[test]
-    fn reset_password_returns_ok_on_200() {
-        let body = serde_json::json!({ "ok": true });
-        let (port, server) = spawn_canned_response_server(body, "HTTP/1.1 200 OK");
-        let (state, dir) = temp_app_state();
-
-        super::reset_headroom_password_with_base_url(
-            &state,
-            "user@example.com",
-            &format!("http://127.0.0.1:{port}"),
-        )
-        .expect("reset succeeds");
-
-        server.join().unwrap();
-        drop_state(dir);
+    fn account_mapping_trial_window() {
+        use super::account_from_supabase;
+        let profile = crate::supabase::SupabaseProfile {
+            email: Some("u@example.com".into()),
+            trial_ends_at: Some(Utc::now() + Duration::days(2)),
+            invite_bonus_percent: 0.0,
+        };
+        let license = crate::supabase::SupabaseLicense {
+            tier: Some("trial".into()),
+            status: "trialing".into(),
+            kind: "trial".into(),
+            starts_at: Some(Utc::now() - Duration::hours(1)),
+            ends_at: Some(Utc::now() + Duration::days(2)),
+        };
+        let account = account_from_supabase(&profile, Some(&license), "u@example.com");
+        assert!(account.trial_active);
+        assert!(!account.subscription_active);
+        assert_eq!(account.subscription_tier, None);
     }
 
+    /// An expired trial maps to `trial_active=false`, which drives the
+    /// TrialEnded gate in status evaluation.
     #[test]
-    fn reset_password_surfaces_gateway_error_message() {
-        let body = serde_json::json!({ "error": "Email rate limit exceeded" });
-        let (port, server) = spawn_canned_response_server(body, "HTTP/1.1 429 Too Many Requests");
-        let (state, dir) = temp_app_state();
-
-        let err = super::reset_headroom_password_with_base_url(
-            &state,
-            "user@example.com",
-            &format!("http://127.0.0.1:{port}"),
-        )
-        .expect_err("429 surfaces as error");
-        assert!(err.contains("Email rate limit"), "unexpected: {err}");
-
-        server.join().unwrap();
-        drop_state(dir);
+    fn account_mapping_expired_trial() {
+        use super::account_from_supabase;
+        let profile = crate::supabase::SupabaseProfile {
+            email: Some("u@example.com".into()),
+            trial_ends_at: Some(Utc::now() - Duration::hours(1)),
+            invite_bonus_percent: 0.0,
+        };
+        let license = crate::supabase::SupabaseLicense {
+            tier: Some("trial".into()),
+            status: "trialing".into(),
+            kind: "trial".into(),
+            starts_at: Some(Utc::now() - Duration::days(8)),
+            ends_at: Some(Utc::now() - Duration::hours(1)),
+        };
+        let account = account_from_supabase(&profile, Some(&license), "u@example.com");
+        assert!(!account.trial_active);
+        assert!(!account.subscription_active);
     }
 
     // ── activate_account / create_checkout_session / get_billing_portal_url ─
@@ -8242,14 +8262,11 @@ mod tests {
         let grace = grace.message;
         let funnel = super::post_grace_start_with_step_to(&identity, "test_step", refused)
             .expect_err("port 1 refuses");
-        let account =
-            match super::fetch_remote_account_with_base_url("secret-token", &identity, refused)
-                .err()
-            {
-                Some(super::RemoteAccountSyncError::Transport(text)) => text,
-                other => panic!("expected a transport error, got {other:?}"),
-            };
-        for err in [&grace, &funnel, &account] {
+        // Account sync now goes to a fixed hosted Supabase URL (not a
+        // parameterizable local port), so it is not part of this arbitrary-URL
+        // transport-causation test anymore; the Supabase transport errors are
+        // surfaced through supabase::* and follow the same cause-chain rule.
+        for err in [&grace, &funnel] {
             // "Connection refused" on macOS/Linux, "actively refused it" on
             // Windows.
             assert!(

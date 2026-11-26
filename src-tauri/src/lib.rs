@@ -29,6 +29,7 @@ mod proxy_intercept;
 mod savings_canary;
 mod state;
 mod storage;
+mod supabase;
 mod tip_signals;
 mod tool_manager;
 mod upstream_override;
