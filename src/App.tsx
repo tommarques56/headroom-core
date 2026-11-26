@@ -2515,7 +2515,7 @@ export default function App() {
       }
 
       updateStartup("runtime", 80, "Preparing Headroom runtime…");
-      const [runtimeResult, pricingResult, launchFlagsResult] = await Promise.all([
+      const [runtimeResult, pricingResult0, launchFlagsResult] = await Promise.all([
         invoke<RuntimeStatus>("get_runtime_status").catch(() => null),
         invoke<HeadroomPricingStatus>("get_headroom_pricing_status").catch(() => null),
         // Cached read; waits on one config fetch per install only while no
@@ -2531,11 +2531,37 @@ export default function App() {
       if (runtimeResult) {
         applyRuntimeStatusIfChanged(runtimeResult);
       }
-      if (pricingResult) {
-        setPricingStatus(pricingResult);
-      }
       if (launchFlagsResult) {
         setLaunchFlags(launchFlagsResult);
+      }
+
+      // The sign-in wall (and the whole tray UI) depends on knowing whether an
+      // account is authenticated. Keep the loading bar up until we have a real
+      // answer instead of flashing the app and then the wall. Retry a bounded
+      // number of times so a slow backend doesn't hang the bar forever, but a
+      // transient miss doesn't dump the user into the wrong screen either.
+      let pricingResult = pricingResult0;
+      for (let attempt = 0; attempt < 3 && !pricingResult && active; attempt++) {
+        updateStartup(
+          "runtime",
+          80 + attempt * 5,
+          "Checking your sign-in status…"
+        );
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 350));
+        if (!active) {
+          return;
+        }
+        // skip the first retry's immediate re-invoke by only polling after one
+        // beat; get_headroom_pricing_status is cheap and cached server-side.
+        pricingResult = await invoke<HeadroomPricingStatus>(
+          "get_headroom_pricing_status"
+        ).catch(() => null);
+      }
+      if (!active) {
+        return;
+      }
+      if (pricingResult) {
+        setPricingStatus(pricingResult);
       }
 
       updateStartup(
@@ -7054,6 +7080,32 @@ export default function App() {
   return (
     <main className="tray-shell">
       {upgradeOverlay}
+      {/* Auth wall: when the user is signed out, block the whole UI with a
+          login/register screen instead of leaving a tiny "sign in" affordance
+          buried in a settings card. Everything else (dashboard, connectors,
+          stats) stays unreachable until they authenticate. The form markup is
+          the existing pricingAuthCard (login/register/forgot), reused here. */}
+      {windowLabel === "main" && pricingStatus?.needsAuthentication ? (
+        <section className="auth-wall">
+          <div className="auth-wall__card">
+            <img className="auth-wall__logo" src={headroomLogo} alt="Headroom" />
+            <h1 className="auth-wall__title">Sign in to Headroom</h1>
+            <p className="auth-wall__sub">
+              You're signed out. Compression is paused until you sign in or
+              create an account.
+            </p>
+            {pricingAuthCard}
+            <p className="auth-wall__note">
+              Headroom needs a signed-in account to route and compress your
+              LLM traffic. Your OpenAI model and base URL are untouched.
+            </p>
+            {pricingError ? (
+              <p className="install-progress__error">{pricingError}</p>
+            ) : null}
+          </div>
+        </section>
+      ) : (
+        <>
       {/* The sidebar's empty space moves the dashboard on Windows and Linux,
           like a title bar. macOS keeps the menu-bar popover in place. */}
       <aside
@@ -9334,6 +9386,8 @@ export default function App() {
             </div>
           ) : null}
       </section>
+        </>
+      )}
     </main>
   );
 }

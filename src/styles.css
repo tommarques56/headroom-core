@@ -785,6 +785,62 @@ select {
   overflow: hidden;
 }
 
+/* Full-screen sign-in wall shown when the user is signed out. It replaces
+   the whole tray shell (sidebar + dashboard) until they authenticate, so the
+   signed-out state is unmistakable instead of a buried "Sign in" button. */
+.auth-wall {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  min-height: 100vh;
+  background: linear-gradient(
+    180deg,
+    var(--surface),
+    var(--surface-raised)
+  );
+}
+
+.auth-wall__card {
+  width: 100%;
+  max-width: 400px;
+  display: grid;
+  gap: 14px;
+  text-align: center;
+}
+
+.auth-wall__logo {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 4px;
+  border-radius: 14px;
+  object-fit: contain;
+}
+
+.auth-wall__title {
+  margin: 0;
+  font-size: 1.4rem;
+  line-height: 1.2;
+}
+
+.auth-wall__sub {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.auth-wall__note {
+  margin: 6px 0 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.auth-wall__card .pricing-auth-card {
+  text-align: left;
+}
+
+
 .tray-sidebar {
   display: flex;
   flex-direction: column;

@@ -4219,6 +4219,17 @@ impl ToolManager {
                     // adds no compression), leaving the savings chart flat.
                     .env("HEADROOM_MODE", "token")
                     .env("HEADROOM_DEDUPE", user_env_or("HEADROOM_DEDUPE", "1"))
+                    // token-mode compression floor. The wheel's default (500)
+                    // skips short turns entirely ("too small"), which reads as
+                    // "Cursor/desktop doesn't compress". Lower the floor so
+                    // every turn is eligible: 10 keeps the guardrail against
+                    // crushing trivial 1-2 token user messages while still
+                    // exercising compression on modest turns. HEADROOM_MIN_TOKENS=0
+                    // remains available for "crush everything".
+                    .env(
+                        "HEADROOM_MIN_TOKENS",
+                        user_env_or("HEADROOM_MIN_TOKENS", "10"),
+                    )
                     .env(
                         "HEADROOM_COLD_RECOMPACT",
                         user_env_or(
