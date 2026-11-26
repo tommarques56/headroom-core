@@ -1419,7 +1419,10 @@ fn fetch_codex_usage(
         ),
         Some(a) if a.trial_active => (CodexActivation::Ungated, a.invite_bonus_percent),
         Some(a) if a.grandfathered => (CodexActivation::Metered, a.invite_bonus_percent),
-        Some(a) => (CodexActivation::HardBlock, a.invite_bonus_percent),
+        // Free forever: a signed-in account is never hard-blocked. Whatever
+        // remains after the branches above (any legacy state) stays fully
+        // ungated — Headroom is free, there is no post-trial wall.
+        Some(a) => (CodexActivation::Ungated, a.invite_bonus_percent),
         None => (CodexActivation::Ungated, 0.0),
     };
     // The snapshot comes from Codex response headers seen in-process, so it
@@ -1988,40 +1991,29 @@ fn finalize_supabase_session(
 }
 
 /// Build a `HeadroomAccountProfile` from the Supabase profile + license rows.
+///
+/// Headroom is free and unlimited for signed-in accounts: the 7-day trial the
+/// Supabase signup trigger grants is informational only. A signed-in account
+/// is never gated on expiration — `trial_active` stays true so the pricing
+/// gate keeps optimization fully enabled, and there is no "trial ended" wall.
 fn account_from_supabase(
     profile: &supabase::SupabaseProfile,
-    license: Option<&supabase::SupabaseLicense>,
+    _license: Option<&supabase::SupabaseLicense>,
     email: &str,
 ) -> HeadroomAccountProfile {
-    let trial_ends_at = profile
-        .trial_ends_at
-        .or_else(|| license.and_then(|l| l.ends_at));
-    let trial_active = trial_ends_at.is_some_and(|t| Utc::now() < t);
-    let (subscription_active, subscription_tier) = match license {
-        Some(l) if l.tier.is_some() && l.kind != "trial" => {
-            let tier: Option<HeadroomSubscriptionTier> =
-                match l.tier.as_deref().unwrap_or("").to_ascii_lowercase().as_str() {
-                    "pro" => Some(HeadroomSubscriptionTier::Pro),
-                    "max5x" => Some(HeadroomSubscriptionTier::Max5x),
-                    "max20x" => Some(HeadroomSubscriptionTier::Max20x),
-                    "pro500" => Some(HeadroomSubscriptionTier::Pro500),
-                    _ => None,
-                };
-            let active = l.status == "active"
-                || l.status == "trialing"
-                || l.status == "past_due"; // still entitled
-            (active && tier.is_some(), tier)
-        }
-        _ => (false, None),
-    };
+    // Free forever: the trial window (or any license) never expires. The
+    // account is always entitled while signed in.
+    let trial_active = true;
     HeadroomAccountProfile {
         email: email.to_string(),
-        trial_started_at: license.and_then(|l| l.starts_at),
-        trial_ends_at,
+        trial_started_at: None,
+        trial_ends_at: None,
         trial_usage_days_left: None,
         trial_active,
-        subscription_active,
-        subscription_tier,
+        // Below: no subscription concept — Headroom is free. All subscription
+        // fields stay unset so the pricing gate never engages a paid path.
+        subscription_active: false,
+        subscription_tier: None,
         subscription_started_at: None,
         subscription_renews_at: None,
         subscription_amount_cents: None,
@@ -2845,16 +2837,15 @@ fn evaluate_pricing_status_with_mismatch(
             recommended_subscription_tier = gate.recommended_subscription_tier;
             gate_message = gate.gate_message;
         } else {
-            // Trial ended, no subscription, not grandfathered: hard block. There
-            // is no usable free plan post-trial, so optimization stops for every
-            // Claude tier until the user upgrades.
-            optimization_allowed = false;
-            should_nudge = true;
-            nudge_level = u8::MAX;
-            gate_reason = Some(PricingGateReason::TrialEnded);
-            recommended_subscription_tier = headroom_tier_for_claude_plan(&claude.plan_tier);
+            // Headroom is free and unlimited for every signed-in account. A
+            // trial window ending (or any other non-subscription state) never
+            // blocks optimization: keep it fully enabled with no upgrade nag.
+            optimization_allowed = true;
+            should_nudge = false;
+            nudge_level = 0;
+            gate_reason = None;
             gate_message =
-                "Your Headroom trial has ended. Upgrade to keep Headroom optimizing your prompts."
+                "Headroom is free — optimization stays fully enabled for your signed-in account."
                     .into();
         }
     } else if authenticated {
@@ -6011,9 +6002,10 @@ mod tests {
     }
 
     #[test]
-    fn post_trial_hard_blocks_every_tier_with_no_free_plan() {
-        // Trial ended, no subscription: optimization stops for every Claude
-        // tier. There is no usable free plan post-trial.
+    fn post_trial_stays_free_and_fully_enabled_for_every_tier() {
+        // Headroom is free: even with an expired trial and no subscription,
+        // optimization stays fully enabled for every Claude tier. No gate,
+        // no upgrade nag.
         for tier in [
             ClaudePlanTier::Free,
             ClaudePlanTier::Pro,
@@ -6034,14 +6026,14 @@ mod tests {
                 None,
             );
             assert!(
-                !status.optimization_allowed,
-                "{tier:?}: post-trial must block optimization"
+                status.optimization_allowed,
+                "{tier:?}: expired trial must keep optimization enabled (free app)"
             );
-            assert!(status.should_nudge);
-            assert!(matches!(
-                status.gate_reason,
-                Some(PricingGateReason::TrialEnded)
-            ));
+            assert!(!status.should_nudge, "{tier:?}: no upgrade nag for a free app");
+            assert!(
+                status.gate_reason.is_none(),
+                "{tier:?}: no trial-ended gate for a free app"
+            );
         }
     }
 
@@ -6104,10 +6096,10 @@ mod tests {
     }
 
     #[test]
-    fn trial_ended_hard_block_reports_no_weekly_limit_nudge() {
-        // The hard block sets should_nudge purely to surface the upgrade prompt;
-        // reporting it would email "close to your weekly limit on the free plan"
-        // to someone whose trial simply expired. Codex hard-block likewise.
+    fn expired_trial_never_reports_a_weekly_limit_nudge() {
+        // A fully-free account never nudges "close to your weekly limit" and
+        // never surfaces a trial-ended hard block: expired state simply reports
+        // no usage-band signal at all.
         let (start, end) = grace();
         let mut status = evaluate_pricing_status(
             true,
@@ -6120,16 +6112,21 @@ mod tests {
             false,
             None,
         );
-        assert!(status.should_nudge);
+        assert!(status.optimization_allowed, "free account stays enabled");
+        assert!(!status.should_nudge);
         assert!(super::weekly_limit_signal(&status).is_none());
 
+        // Codex on the same free account: even a legacy HardBlock activation
+        // cannot pause a signed-in free user; it resolves to a usage snapshot
+        // that reports no signal and no gate.
         status.codex = Some(super::codex_usage_from_snapshot(
             codex_snapshot_with_weekly(80.0),
             crate::models::CodexPlanTier::Pro,
-            super::CodexActivation::HardBlock,
+            super::CodexActivation::Ungated,
             0.0,
         ));
         assert!(super::weekly_limit_signal(&status).is_none());
+        assert_eq!(status.codex.as_ref().map(|c| c.optimization_allowed), Some(true));
     }
 
     #[test]
@@ -7646,7 +7643,8 @@ mod tests {
     }
 
     /// The mapping from Supabase profile+license rows yields a correct
-    /// HeadroomAccountProfile: trial window, tier, and bonify clamp.
+    /// HeadroomAccountProfile: free forever (no expiry), invite bonus clamp,
+    /// and no subscription concept.
     #[test]
     fn supabase_rows_map_to_account_profile() {
         use super::account_from_supabase;
@@ -7663,15 +7661,17 @@ mod tests {
             ends_at: Some(Utc::now() + Duration::days(5)),
         };
         let account = account_from_supabase(&profile, Some(&license), "u@example.com");
-        assert!(account.trial_active);
-        assert!(!account.subscription_active);
-        assert_eq!(account.trial_usage_days_left, None);
+        assert!(account.trial_active, "signed-in account stays active");
+        assert!(!account.subscription_active, "free app has no subscription");
+        assert_eq!(account.subscription_tier, None);
+        assert_eq!(account.invite_bonus_percent, 20.0);
         assert_eq!(account.email, "u@example.com");
     }
 
-    /// A paid (non-trial) license maps to an active subscription with a tier.
+    /// The free model ignores license tier/kind entirely: even a paid-looking
+    /// row maps to a free account (no upsell, no subscription gate).
     #[test]
-    fn supabase_paid_license_maps_to_subscription() {
+    fn supabase_paid_license_still_maps_free_forever() {
         use super::account_from_supabase;
         let profile = crate::supabase::SupabaseProfile::default();
         let license = crate::supabase::SupabaseLicense {
@@ -7682,11 +7682,9 @@ mod tests {
             ends_at: None,
         };
         let account = account_from_supabase(&profile, Some(&license), "u@example.com");
-        assert!(account.subscription_active);
-        assert_eq!(
-            account.subscription_tier,
-            Some(super::HeadroomSubscriptionTier::Pro)
-        );
+        assert!(account.trial_active, "always entitled while signed in");
+        assert!(!account.subscription_active, "no paid path in the free app");
+        assert_eq!(account.subscription_tier, None);
     }
 
     #[test]
@@ -7896,34 +7894,12 @@ mod tests {
         assert!(err.contains("Invalid login credentials"), "unexpected: {err}");
     }
 
-    /// A trial license that has not ended keeps `trial_active` true and the
-    /// subscription unset.
+    /// The free model: even a license that reads "expired trial" keeps the
+    /// account fully active — a signed-in account is never gated on time.
     #[test]
-    fn account_mapping_trial_window() {
+    fn account_mapping_free_forever_ignores_trial_window() {
         use super::account_from_supabase;
-        let profile = crate::supabase::SupabaseProfile {
-            email: Some("u@example.com".into()),
-            trial_ends_at: Some(Utc::now() + Duration::days(2)),
-            invite_bonus_percent: 0.0,
-        };
-        let license = crate::supabase::SupabaseLicense {
-            tier: Some("trial".into()),
-            status: "trialing".into(),
-            kind: "trial".into(),
-            starts_at: Some(Utc::now() - Duration::hours(1)),
-            ends_at: Some(Utc::now() + Duration::days(2)),
-        };
-        let account = account_from_supabase(&profile, Some(&license), "u@example.com");
-        assert!(account.trial_active);
-        assert!(!account.subscription_active);
-        assert_eq!(account.subscription_tier, None);
-    }
-
-    /// An expired trial maps to `trial_active=false`, which drives the
-    /// TrialEnded gate in status evaluation.
-    #[test]
-    fn account_mapping_expired_trial() {
-        use super::account_from_supabase;
+        // Expired trial window in the backing store...
         let profile = crate::supabase::SupabaseProfile {
             email: Some("u@example.com".into()),
             trial_ends_at: Some(Utc::now() - Duration::hours(1)),
@@ -7936,9 +7912,30 @@ mod tests {
             starts_at: Some(Utc::now() - Duration::days(8)),
             ends_at: Some(Utc::now() - Duration::hours(1)),
         };
+        // ...but the account stays active: Headroom is free, no expiry.
         let account = account_from_supabase(&profile, Some(&license), "u@example.com");
-        assert!(!account.trial_active);
+        assert!(account.trial_active, "expired trial still leaves the app free");
         assert!(!account.subscription_active);
+        assert_eq!(account.subscription_tier, None);
+    }
+
+    /// Mapping never surfaces a subscription even for a "pro" row: the free
+    /// app has no paid path to trigger an upsell or a mismatch gate.
+    #[test]
+    fn account_mapping_no_subscription_ever() {
+        use super::account_from_supabase;
+        let profile = crate::supabase::SupabaseProfile::default();
+        let license = crate::supabase::SupabaseLicense {
+            tier: Some("pro".into()),
+            status: "active".into(),
+            kind: "subscription".into(),
+            starts_at: Some(Utc::now() - Duration::days(30)),
+            ends_at: None,
+        };
+        let account = account_from_supabase(&profile, Some(&license), "u@example.com");
+        assert!(account.trial_active);
+        assert!(!account.subscription_active);
+        assert_eq!(account.subscription_tier, None);
     }
 
     // ── activate_account / create_checkout_session / get_billing_portal_url ─
